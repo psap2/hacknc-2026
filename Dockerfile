@@ -5,8 +5,12 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# better-sqlite3 falls back to compiling from source when no prebuilt matches the
+# host's Node build (seen on Railway), so keep a minimal toolchain available.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
-# better-sqlite3 and sharp ship prebuilt linux binaries, so no compiler toolchain is needed.
 # tsx is a devDependency and we run TypeScript directly with it, so install everything.
 RUN npm ci
 
