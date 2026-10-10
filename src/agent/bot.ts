@@ -617,8 +617,13 @@ export class Tab {
     const now = this.now();
     const reminded: string[] = [];
     const square: string[] = [];
+    const { net } = tripLedger(this.store, trip.id);
     for (const id of targets) {
-      const owesMe = pairwise(this.store, trip.id, id).find((p) => p.other === user.id)?.cents ?? 0;
+      // Someone who is square overall (paid via the routed settle plan) owes nobody, whatever
+      // the pairwise lines say; otherwise cite the pairwise amount, capped at their net debt.
+      const theirNet = net.get(id) ?? 0;
+      const pair = pairwise(this.store, trip.id, id).find((p) => p.other === user.id)?.cents ?? 0;
+      const owesMe = theirNet < 0 ? Math.min(pair, -theirNet) : 0;
       if (owesMe <= 0) {
         square.push(this.nameOf(this.store.user(id)));
         continue;
@@ -638,8 +643,13 @@ export class Tab {
     await this.say(user, parts.join(" "));
   }
 
-  /** "you owe Amit $20.00 and Priya $32.00 · Sam owes you $7.50" */
+  /**
+   * "you owe Amit $20.00 and Priya $32.00 · Sam owes you $7.50". Settle-up payments are routed
+   * for fewest transfers, so once someone is square overall the pairwise view can still show
+   * offsetting lines; say "all square" in that case rather than confuse them.
+   */
   private runningLine(userId: number, tripId: number): string {
+    if ((tripLedger(this.store, tripId).net.get(userId) ?? 0) === 0) return "you're all square";
     const pairs = pairwise(this.store, tripId, userId);
     const owe = pairs.filter((p) => p.cents > 0).map((p) => `${this.nameOf(this.store.user(p.other))} ${fmt(p.cents)}`);
     const owed = pairs.filter((p) => p.cents < 0).map((p) => `${this.nameOf(this.store.user(p.other))} owes you ${fmt(-p.cents)}`);
