@@ -35,9 +35,9 @@ const INTENT_SCHEMA = {
   properties: {
     kind: {
       type: "string",
-      enum: ["expense", "new_trip", "dispute", "remind", "rename", "why", "balance", "settle", "pay", "help", "undo", "link", "agree", "unknown"],
+      enum: ["expense", "new_trip", "close_trip", "dispute", "remind", "rename", "why", "balance", "settle", "pay", "help", "undo", "link", "agree", "unknown"],
     },
-    trip_name: { type: ["string", "null"], description: "For new_trip: the destination or name, Title Case, without the word 'trip'. null if not stated." },
+    trip_name: { type: ["string", "null"], description: "For new_trip/close_trip: the destination or name, Title Case, without the word 'trip'. null if not stated." },
     reason: { type: ["string", "null"], description: "For dispute: the sender's complaint in their own words." },
     people: { type: "array", items: { type: "string" }, description: "For remind: member names (exact spelling) or 'everyone'." },
     new_name: { type: ["string", "null"], description: "For rename: what the sender wants to be called." },
@@ -165,6 +165,7 @@ The sender ${ctx.hasImage ? "ALSO attached a receipt photo (so an expense is ver
 
 People text casually. Read for meaning, not keywords. Classify the message:
 - new_trip: wants to start/plan a trip or tab ("i am going on a new trip to florida", "nashville next weekend, start a tab", "new trip"). trip_name = the place or name.
+- close_trip: the trip is over / wants to close or archive it ("we're done with florida", "close the nyc tab"). trip_name if said.
 - expense: the sender paid for something to split, or asks to be paid back ("pay me $30", "gas, everyone", "dinner, me jake and sam", "2,400 for flights").
 - dispute: pushes back on a charge ("that's wrong", "I wasn't at that dinner", "I didn't order drinks"). reason = their words.
 - agree: ${ctx.openDispute ? "accepts the friend's dispute (\"fine\", \"fair\", \"take her off\")" : "n/a (no open dispute) -> unknown"}.
@@ -190,6 +191,8 @@ Message: """${text}"""`,
       switch (out.kind) {
         case "new_trip":
           return { kind: "new_trip", tripName: out.trip_name?.trim() || null };
+        case "close_trip":
+          return { kind: "close_trip", tripName: out.trip_name?.trim() || null };
         case "dispute":
           return { kind: "dispute", reason: out.reason?.trim() || text };
         case "remind":

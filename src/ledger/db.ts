@@ -24,6 +24,7 @@ export interface Trip {
   organizer_id: number;
   created_at: number;
   settle_requested_at: number | null;
+  closed_at: number | null;
 }
 
 export interface Expense {
@@ -148,6 +149,10 @@ export function openDb(path: string): DB {
   // Shares used to wait for a YES; now they count as soon as they're logged. Fold over any
   // rows left in the old state so existing trips add up (safe to run every boot).
   db.prepare("UPDATE shares SET status = 'approved', decided_at = COALESCE(decided_at, ?) WHERE status = 'pending'").run(Date.now());
+  // Trips can be closed once everyone's square, so people in several trips aren't asked
+  // "which trip?" about ones that are over.
+  const tripCols = (db.prepare("PRAGMA table_info(trips)").all() as { name: string }[]).map((c) => c.name);
+  if (!tripCols.includes("closed_at")) db.exec("ALTER TABLE trips ADD COLUMN closed_at INTEGER");
   return db;
 }
 
@@ -206,6 +211,25 @@ export class Store {
     return this.db
       .prepare("SELECT t.* FROM trips t JOIN members m ON m.trip_id = t.id WHERE m.user_id = ? ORDER BY t.created_at DESC")
       .all(userId) as Trip[];
+  }
+  /** Trips the person is in that aren't closed, oldest first (stable, so "2)" means the same trip every time). */
+  openTripsFor(userId: number): Trip[] {
+    return this.db
+      .prepare("SELECT t.* FROM trips t JOIN members m ON m.trip_id = t.id WHERE m.user_id = ? AND t.closed_at IS NULL ORDER BY t.created_at, t.id")
+      .all(userId) as Trip[];
+  }
+  closeTrip(tripId: number, now: number) {
+    this.db.prepare("UPDATE trips SET closed_at = ? WHERE id = ?").run(now, tripId);
+  }
+  /** The person's newest active expense across the given trips (for UNDO when they're in several). */
+  lastExpenseByAcross(payerId: number, tripIds: number[]): Expense | undefined {
+    if (!tripIds.length) return undefined;
+    return this.db
+      .prepare(
+        `SELECT * FROM expenses WHERE payer_id = ? AND status = 'active' AND trip_id IN (${tripIds.map(() => "?").join(",")})
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+      )
+      .get(payerId, ...tripIds) as Expense | undefined;
   }
   markSettleRequested(tripId: number, now: number) {
     this.db.prepare("UPDATE trips SET settle_requested_at = ? WHERE id = ?").run(now, tripId);

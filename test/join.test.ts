@@ -131,7 +131,8 @@ describe("joining from the web invite", () => {
     const { store, bot } = setup(m);
     await makeTrip(bot, store);
     await bot.handle({ phone: AMIT, text: "ok we're going on a trip to Florida in march", images: [] });
-    expect(m.to(AMIT).at(-2)).toMatch(/Florida Trip created!/);
+    expect(m.to(AMIT).at(-3)).toMatch(/Florida Trip created!/);
+    expect(m.to(AMIT).at(-1)).toContain("You're also in Asheville Trip");
     expect(store.allTrips().map((t) => t.name).sort()).toEqual(["Asheville Trip", "Florida Trip"]);
   });
 

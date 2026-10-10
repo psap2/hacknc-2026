@@ -8,10 +8,10 @@ export function money(cents: number): string {
 }
 
 /** ["Jake","Priya","Sam"] -> "Jake, Priya, and Sam" */
-export function listNames(names: string[]): string {
+export function listNames(names: string[], joiner: "and" | "or" = "and"): string {
   if (names.length <= 1) return names.join("");
-  if (names.length === 2) return `${names[0]} and ${names[1]}`;
-  return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)}`;
+  if (names.length === 2) return `${names[0]} ${joiner} ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, ${joiner} ${names.at(-1)}`;
 }
 
 export function shortDate(ms: number): string {

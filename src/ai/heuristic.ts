@@ -54,7 +54,7 @@ export function heuristicDescription(text: string, memberNames: string[]): strin
   const noMoney = text.replace(/\$?\s*\d+(?:\.\d+)?\s*k\b/gi, " ").replace(/\$?\s*\d[\d,]*(?:\.\d{1,2})?/g, " ");
   let s = noMoney.split(/[,.;!\n]/)[0] ?? "";
   s = s
-    .replace(/\b(i|we|paid|pay|me|you|for|on|the|a|an|spent|bought|got|owe|split|it|this|is|was|total|everyone|evenly|ways|with|and)\b/gi, " ");
+    .replace(/\b(i|we|paid|pay|me|you|for|on|the|a|an|spent|bought|got|owe|split|it|this|is|was|total|everyone|evenly|ways|with|and|actually|also|just|oh|ok|okay)\b/gi, " ");
   for (const n of memberNames) s = s.replace(new RegExp(`\\b${escape(n)}\\b`, "gi"), " ");
   s = s.replace(/\s+/g, " ").trim();
   if (!s) return null;
@@ -80,6 +80,9 @@ export function heuristicIntent(text: string, ctx: InterpretContext): Intent {
   if (/\bwhy\b|how much do i owe|breakdown/i.test(t)) return { kind: "why" };
   if (/^(balance|balances|total|totals|what do i owe|status)\b|\b(my|running) total\b|where do i stand/i.test(t)) return { kind: "balance" };
   if (/^(undo|take that back|delete that|remove that|scratch that|cancel that)\b/i.test(t)) return { kind: "undo" };
+  // The trip name may already have been stripped by the router ("we're done with nyc" -> "we're done with").
+  const close = t.match(/^(?:we'?re |i'?m )?(?:all )?done with\s*(?:the\s+)?(.*?)(?:\s+(?:trip|tab))?[.!]*$/i) ?? t.match(/\b(?:close|archive|wrap up)\s+(?:the\s+)?(?:(.+?)\s+)?(?:trip|tab)\b/i);
+  if (close) return { kind: "close_trip", tripName: close[1]?.trim() || null };
   if (/\b(invite|trip) (link|page)\b|send (me )?the link\b/i.test(t)) return { kind: "link" };
   const remind = t.match(/\b(?:remind|nudge|poke|bug)\s+(.+?)[.!?]*$/i);
   if (remind) return { kind: "remind", names: remind[1]!.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean) };

@@ -17,6 +17,8 @@ export type Intent =
   | { kind: "expense"; amountCents: number | null; description: string | null; split: SplitSpec }
   /** Start a trip. tripName null = they want one but didn't say what to call it. */
   | { kind: "new_trip"; tripName: string | null }
+  /** Close/finish a trip; tripName null = whichever one they're in. */
+  | { kind: "close_trip"; tripName: string | null }
   /** Push back on a charge; reason is their own words. */
   | { kind: "dispute"; reason: string | null }
   /** Nudge named people (or "everyone") about what they owe. */

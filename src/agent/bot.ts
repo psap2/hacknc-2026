@@ -1,5 +1,5 @@
 import type { AI, InterpretContext, SplitSpec } from "../ai/types.js";
-import { heuristicTripName } from "../ai/heuristic.js";
+import { heuristicAmount, heuristicTripName } from "../ai/heuristic.js";
 import type { Expense, Store, Trip, User } from "../ledger/db.js";
 import { breakdownFor, pairwise, tripLedger } from "../ledger/settle.js";
 import { type Receipt, receiptLooksConsistent, splitEven, splitItems } from "../ledger/split.js";
@@ -28,6 +28,8 @@ export interface BotDeps {
 type PendingState =
   | { kind: "awaiting_name" }
   | { kind: "awaiting_trip_name" }
+  /** In several trips and the message didn't say which: hold it until they pick. */
+  | { kind: "awaiting_trip_pick"; options: number[]; suggested: number }
   | { kind: "awaiting_reason"; amountCents: number; split: SplitSpec }
   | { kind: "awaiting_amount"; description: string | null; split: SplitSpec; hasPhoto: boolean }
   | { kind: "awaiting_split_mode"; receipt: Receipt; description: string }
@@ -45,6 +47,8 @@ export class Tab {
   private readonly cfg: BotConfig;
   private readonly now: () => number;
   private paying = new Set<number>();
+  /** Messages (possibly with photos) parked while we ask "which trip?", keyed by user id. */
+  private held = new Map<number, Inbound>();
 
   constructor(deps: BotDeps) {
     this.store = deps.store;
@@ -71,10 +75,10 @@ export class Tab {
     }
   }
 
-  private async handleNow(msg: Inbound): Promise<void> {
+  private async handleNow(msg: Inbound, tripOverride?: Trip): Promise<void> {
     const user = this.store.upsertUser(msg.phone, this.now());
-    const text = msg.text.trim();
-    const cmd = text.toUpperCase().replace(/[.!?]+$/, "");
+    let text = msg.text.trim();
+    let cmd = text.toUpperCase().replace(/[.!?]+$/, "");
 
     const join = cmd.match(/^JOIN\s*([A-Z0-9]{4,10})$/);
     if (join) return this.joinTrip(user, join[1]!);
@@ -102,49 +106,81 @@ export class Tab {
       return;
     }
 
-    const trip = this.activeTrip(user);
-    if (!trip) {
+    const open = this.store.openTripsFor(user.id);
+    if (!open.length) {
       // Not in a trip yet: the only useful thing they can mean is "start one", so let the model
       // read casual phrasings ("i am going on a new trip to florida") before giving up.
       const intent = text ? await this.ai.interpret(text, this.ctx(user, undefined, false)) : null;
       if (intent?.kind === "new_trip") return this.startTripFromIntent(user, intent.tripName);
+      const closed = this.store.tripsFor(user.id).length > 0;
       return this.say(
         user,
-        `Hi! I'm ${this.cfg.botName}. I split trip expenses so nobody has to chase anyone. ` +
-          `Text "new trip <name>" to start one, or tap the invite link a friend sent you.`,
+        closed
+          ? `All your trips are closed. Text "new trip <name>" to start another, or tap an invite link a friend sent you.`
+          : `Hi! I'm ${this.cfg.botName}. I split trip expenses so nobody has to chase anyone. ` +
+              `Text "new trip <name>" to start one, or tap the invite link a friend sent you.`,
       );
     }
     if (!user.name) {
       // Enrolled from the web invite but our greeting never reached them: whatever they just
       // sent is a hello, not an answer. Greet now and ask properly.
-      return this.enroll(user, trip);
+      return this.enroll(user, tripOverride ?? open[0]!);
     }
 
-    if (/^(YES|Y|YEP|YEAH|OK|OKAY|APPROVE|APPROVED|👍)$/.test(cmd)) return this.approve(user, trip);
+    // Which trip? One open trip: that one. Several: a trip named in the message wins ("$80 gas,
+    // florida"); otherwise commands fall back to the trip they used last, and expenses get asked.
+    const closeCmd = text.match(/^(?:close|end|finish|archive|wrap up)\s+(?:the\s+|my\s+|our\s+)?(.*?)\s*(?:trip|tab)?\s*(anyway|regardless)?[.!]*$/i) ?? text.match(/^done with\s+(.+?)\s*(anyway)?[.!]*$/i);
+    const named = tripOverride ? undefined : this.matchTrip(open, closeCmd ? (closeCmd[1] ?? "") : text);
+    if (named === "ambiguous") {
+      return this.say(user, `That could be ${listNames(open.map((t) => t.name), "or")}. Which one?`);
+    }
+    if (named) {
+      text = named.text;
+      cmd = text.toUpperCase().replace(/[.!?]+$/, "");
+    }
+    const fresh = this.store.user(user.id);
+    const trip = named?.trip ?? tripOverride ?? open.find((t) => t.id === fresh.active_trip_id) ?? open.at(-1)!;
+    const needsPick = !named && !tripOverride && open.length > 1;
+    if (fresh.active_trip_id !== trip.id) this.store.setActiveTrip(user.id, trip.id);
+
+    if (closeCmd) return this.closeTrip(user, trip, open, Boolean(closeCmd[2]));
+
+    if (/^(YES|Y|YEP|YEAH|OK|OKAY|APPROVE|APPROVED|👍)$/.test(cmd)) return this.approve(user, this.tripWithDisputeAgainst(user, open) ?? trip);
     const dispute = text.match(/^dispute\b[\s:,-]*(.*)$/is);
-    if (dispute) return this.dispute(user, trip, dispute[1]!.trim());
+    if (dispute) return this.dispute(user, named ? [trip] : open, dispute[1]!.trim());
     if (cmd === "WHY") return this.why(user, trip);
     if (/^(SETTLE|SETTLE UP)$/.test(cmd)) return this.settle(user, trip);
     if (cmd === "PAY") return this.pay(user, trip);
-    if (/^(BALANCE|BALANCES|TOTAL|TOTALS|MY TOTAL|RUNNING TOTAL|STATUS)$/.test(cmd)) return this.balance(user, trip);
-    if (cmd === "UNDO") return this.undo(user, trip);
+    if (/^(BALANCE|BALANCES|TOTAL|TOTALS|MY TOTAL|RUNNING TOTAL|STATUS)$/.test(cmd)) {
+      return needsPick ? this.balanceAll(user, open) : this.balance(user, trip);
+    }
+    if (cmd === "UNDO") return this.undo(user, named ? [trip] : open);
     if (/^(LINK|TRIP|INVITE)$/.test(cmd)) return this.link(user, trip);
+    if (/^(TRIPS|MY TRIPS)$/.test(cmd)) return this.listTrips(user, open);
     if (cmd === "HELP") return this.help(user);
     const remind = text.match(/^(?:remind|nudge|poke)\s+(.+?)[.!]*$/i);
     if (remind) return this.remind(user, trip, remind[1]!);
     const agree = text.match(/^(?:agree|agreed|fine|fair|fair enough|ok(?:ay)? fine|drop (?:it|them|him|her)|take (\w+) off|remove (\w+))[.!]*$/i);
-    if (agree && this.store.disputedExpenseFor(user.id, trip.id)) return this.agreeDispute(user, trip, agree[1] ?? agree[2]);
+    const disputedTrip = agree ? this.tripWithDisputeBy(user, open) : undefined;
+    if (agree && disputedTrip) return this.agreeDispute(user, disputedTrip, agree[1] ?? agree[2]);
 
-    if (msg.images.length) return this.receiptExpense(user, trip, msg);
+    if (msg.images.length) {
+      // A payer fixing a dispute with a photo shouldn't be asked which trip; the dispute knows.
+      const fixing = this.tripWithDisputeBy(user, open);
+      if (fixing && !named) return this.receiptExpense(user, fixing, msg);
+      if (needsPick) return this.askTripPick(user, open, trip, msg, true);
+      return this.receiptExpense(user, trip, msg);
+    }
 
     const intent = await this.ai.interpret(text, this.ctx(user, trip, false));
     switch (intent.kind) {
       case "expense":
+        if (needsPick) return this.askTripPick(user, open, trip, { ...msg, text }, false);
         return this.textExpense(user, trip, intent.amountCents, intent.description, intent.split);
       case "why":
         return this.why(user, trip);
       case "balance":
-        return this.balance(user, trip);
+        return needsPick ? this.balanceAll(user, open) : this.balance(user, trip);
       case "settle":
         return this.settle(user, trip);
       case "pay":
@@ -153,8 +189,13 @@ export class Tab {
         return this.help(user);
       case "new_trip":
         return this.startTripFromIntent(user, intent.tripName);
+      case "close_trip": {
+        const target = intent.tripName ? this.matchTrip(open, intent.tripName) : undefined;
+        if (target === "ambiguous") return this.say(user, `Which one: ${listNames(open.map((t) => t.name), "or")}?`);
+        return this.closeTrip(user, target?.trip ?? trip, open, false);
+      }
       case "dispute":
-        return this.dispute(user, trip, intent.reason ?? "");
+        return this.dispute(user, named ? [trip] : open, intent.reason ?? "");
       case "remind":
         return this.remind(user, trip, intent.names.join(", "));
       case "rename": {
@@ -164,14 +205,107 @@ export class Tab {
         return this.say(user, `Got it, I'll call you ${name} from now on.`);
       }
       case "undo":
-        return this.undo(user, trip);
+        return this.undo(user, named ? [trip] : open);
       case "link":
         return this.link(user, trip);
-      case "agree":
-        if (this.store.disputedExpenseFor(user.id, trip.id)) return this.agreeDispute(user, trip);
+      case "agree": {
+        const t = this.tripWithDisputeBy(user, open);
+        if (t) return this.agreeDispute(user, t);
         return this.say(user, `Nothing's waiting on you right now. Text TOTAL to see where you stand.`);
+      }
       default:
         return this.say(user, `Not sure what you mean. Text me a receipt or something like "paid $40 for snacks". Text HELP for more.`);
+    }
+  }
+
+  // ------------------------------------------------------------------ several trips at once
+
+  private static readonly TRIP_STOPWORDS = new Set(["the", "our", "and", "with", "trip", "tab", "for"]);
+
+  private tripKeywords(trip: Trip): string[] {
+    return trip.name
+      .toLowerCase()
+      .split(/[^a-z0-9']+/)
+      .filter((w) => w.length >= 3 && !Tab.TRIP_STOPWORDS.has(w));
+  }
+
+  /**
+   * Does the text name one of these trips? Returns the trip and the text with the trip words
+   * removed ("$80 gas, florida" -> "$80 gas"), "ambiguous" if it names several, else undefined.
+   */
+  private matchTrip(trips: Trip[], text: string): { trip: Trip; text: string } | "ambiguous" | undefined {
+    if (!text) return undefined;
+    const hits = trips
+      .map((trip) => {
+        const words = this.tripKeywords(trip);
+        const hit = words.filter((w) => new RegExp(`\\b${escapeRe(w)}\\b`, "i").test(text));
+        return { trip, hit, score: words.length ? hit.length / words.length : 0 };
+      })
+      .filter((h) => h.hit.length);
+    if (!hits.length) {
+      const exact = trips.filter((t) => t.name.toLowerCase() === text.toLowerCase() || t.code.toLowerCase() === text.toLowerCase());
+      return exact.length === 1 ? { trip: exact[0]!, text: "" } : exact.length ? "ambiguous" : undefined;
+    }
+    const best = Math.max(...hits.map((h) => h.score));
+    const top = hits.filter((h) => h.score === best);
+    if (top.length > 1) return "ambiguous";
+    const { trip, hit } = top[0]!;
+    let stripped = text;
+    for (const w of hit) {
+      stripped = stripped.replace(new RegExp(`\\b(?:(?:for|on|in|to|at)\\s+)?(?:the\\s+|our\\s+)?${escapeRe(w)}(?:\\s+(?:trip|tab))?\\b`, "i"), " ");
+    }
+    stripped = stripped
+      .replace(/\s+/g, " ")
+      .replace(/\s+([,.;:!?])/g, "$1")
+      .replace(/^[\s,.;:-]+|[\s,.;:-]+$/g, "")
+      .trim();
+    return { trip, text: stripped };
+  }
+
+  private async askTripPick(user: User, open: Trip[], suggested: Trip, msg: Inbound, photo: boolean) {
+    this.held.set(user.id, msg);
+    this.store.setPending(user.id, "awaiting_trip_pick", { options: open.map((t) => t.id), suggested: suggested.id }, this.now());
+    const names = open.map((t, i) => `${i + 1}) ${shortTripName(t)}`).join("  ");
+    await this.say(
+      user,
+      `Which trip is that ${photo ? "receipt" : ""}for? ${names}\nReply the name or number, or YES for ${shortTripName(suggested)}. ` +
+        `(Tip: say it inline next time, like "$80 gas, ${shortTripName(suggested).toLowerCase()}".)`,
+    );
+  }
+
+  /** The open trip where someone disputed one of this payer's charges, if any. */
+  private tripWithDisputeBy(payer: User, open: Trip[]): Trip | undefined {
+    return open.find((t) => this.store.disputedExpenseFor(payer.id, t.id));
+  }
+
+  /** The open trip where this person has an open dispute of their own (for YES to take it back). */
+  private tripWithDisputeAgainst(user: User, open: Trip[]): Trip | undefined {
+    return open.find((t) => this.store.disputedSharesFor(user.id, t.id).length);
+  }
+
+  private async listTrips(user: User, open: Trip[]) {
+    const lines = open.map((t) => `• ${t.name}: ${this.runningLine(user.id, t.id)}`);
+    await this.say(user, `Your open trips:\n${lines.join("\n")}\nName the trip when you log something ("$80 gas, ${shortTripName(open[0]!).toLowerCase()}"), or "close <trip>" when one's over.`);
+  }
+
+  private async balanceAll(user: User, open: Trip[]) {
+    const lines = open.map((t) => `${t.name}: ${this.runningLine(user.id, t.id)}`);
+    await this.say(user, `${lines.join("\n")}\nReply TOTAL + trip name for the full picture, or PAY + trip name to settle one.`);
+    for (const t of open) this.store.setPaymentNudge(t.id, user.id, this.now());
+  }
+
+  private async closeTrip(user: User, trip: Trip, open: Trip[], force: boolean) {
+    const { plan } = tripLedger(this.store, trip.id);
+    if (plan.length && !force) {
+      const owed = listNames(plan.map((d) => `${this.nameOf(this.store.user(d.from))} owes ${this.nameOf(this.store.user(d.to))} ${fmt(d.cents)}`));
+      return this.say(user, `${trip.name} isn't settled yet: ${owed}. Reply SETTLE to sort it out, or "close ${shortTripName(trip).toLowerCase()} anyway" to close it as is.`);
+    }
+    this.store.closeTrip(trip.id, this.now());
+    const others = this.store.members(trip.id).filter((m) => m.id !== user.id);
+    const left = open.filter((t) => t.id !== trip.id);
+    await this.say(user, `Closed ${trip.name}. The trip page stays up: ${this.pageLink(trip)}${left.length ? `\nYou're still in ${listNames(left.map((t) => t.name))}.` : ""}`);
+    for (const m of others) {
+      await this.say(m, `${this.nameOf(user)} closed ${trip.name}${plan.length ? " (with balances still open)" : ""}. Everything's still on the trip page: ${this.pageLink(trip)}`);
     }
   }
 
@@ -232,8 +366,12 @@ export class Tab {
     this.store.addMember(trip.id, user.id, this.now());
     this.store.setActiveTrip(user.id, trip.id);
 
+    const others = this.store.openTripsFor(user.id).filter((t) => t.id !== trip.id);
     await this.say(user, `${name} created! Friends can text ${this.cfg.botName} "JOIN ${trip.code}", or forward them this link:`);
     await this.say(user, this.inviteLink(trip));
+    if (others.length) {
+      await this.say(user, `You're also in ${listNames(others.map((t) => t.name))}, so name the trip when you log something, like "$80 gas, ${shortTripName(trip).toLowerCase()}". Text "close <trip>" when one is over.`);
+    }
     if (!user.name) {
       this.store.setPending(user.id, "awaiting_name", {}, this.now());
       await this.say(user, "And what should I call you?");
@@ -301,6 +439,42 @@ export class Tab {
     const trip = this.activeTrip(user);
 
     switch (p.kind) {
+      case "awaiting_trip_pick": {
+        const options = p.options.map((id) => this.store.trip(id)).filter((t) => !t.closed_at);
+        const heldMsg = this.held.get(user.id);
+        const n = Number(text);
+        const byNumber = Number.isInteger(n) && n >= 1 && n <= options.length ? options[n - 1] : undefined;
+        const byYes = /^(yes|y|yep|yeah|ok|okay|sure|👍)[.!]*$/i.test(text) ? options.find((t) => t.id === p.suggested) : undefined;
+        // A brand-new expense or photo replaces the parked one rather than answering the question.
+        const replaces = !byNumber && !byYes && (msg.images.length > 0 || heuristicAmount(text) !== null);
+        const byName = !byNumber && !byYes && !replaces && text ? this.matchTrip(options, text) : undefined;
+        const chosen = byNumber ?? byYes ?? (byName && byName !== "ambiguous" ? byName.trip : undefined);
+        if (chosen) {
+          this.store.clearPending(user.id);
+          this.held.delete(user.id);
+          this.store.setActiveTrip(user.id, chosen.id);
+          if (!heldMsg) {
+            await this.say(user, `Got it, ${chosen.name}. Send that again and I'll log it there.`);
+            return true;
+          }
+          await this.handleNow(heldMsg, chosen);
+          return true;
+        }
+        if (/^(no|nah|nevermind|never mind|cancel|stop|forget it)\b/i.test(text)) {
+          this.store.clearPending(user.id);
+          this.held.delete(user.id);
+          await this.say(user, "Okay, dropped it.");
+          return true;
+        }
+        if (replaces) {
+          this.store.clearPending(user.id);
+          this.held.delete(user.id);
+          return false;
+        }
+        await this.say(user, `Which trip: ${listNames(options.map((t) => shortTripName(t)), "or")}?`);
+        return true;
+      }
+
       case "awaiting_trip_name": {
         if (!text || msg.images.length) return false;
         this.store.clearPending(user.id);
@@ -532,7 +706,7 @@ export class Tab {
     await this.say(payer, `Logged to ${trip.name}: ${expense.description} ${fmt(totalCents)} · ${this.splitSummary(split, byItem)}${note}. ${told}`);
 
     for (const u of others) {
-      await this.say(u, `${this.nameOf(payer)} logged ${expense.description} ${fmt(totalCents)} · your share ${fmt(split.get(u.id)!)}. ${REPLY_HINT}`);
+      await this.say(u, `${this.nameOf(payer)} logged ${expense.description} ${fmt(totalCents)}${this.onTrip(u, trip)} · your share ${fmt(split.get(u.id)!)}. ${REPLY_HINT}`);
       this.store.markNotified(expense.id, u.id, now);
       this.store.setPaymentNudge(trip.id, u.id, now);
     }
@@ -587,22 +761,25 @@ export class Tab {
     await this.say(user, `No need to approve anything: shares count as soon as they're logged. ${REPLY_HINT}`);
   }
 
-  private async dispute(user: User, trip: Trip, reason: string) {
-    const candidates = this.store.approvedSharesFor(user.id, trip.id);
+  private async dispute(user: User, trips: Trip[], reason: string) {
+    const candidates = trips
+      .flatMap((trip) => this.store.approvedSharesFor(user.id, trip.id).map((s) => ({ ...s, trip })))
+      .sort((a, b) => b.expense.created_at - a.expense.created_at || b.expense.id - a.expense.id);
     const words = reason.toLowerCase().match(/[a-z]{3,}/g) ?? [];
     const target = candidates.find((s) => words.some((w) => s.expense.description.toLowerCase().includes(w))) ?? candidates[0];
     if (!target) return this.say(user, "There's nothing of yours to dispute right now.");
+    const trip = target.trip;
     this.store.decideShare(target.expense_id, user.id, "disputed", reason || null, this.now());
     const payer = this.store.user(target.expense.payer_id);
     await this.say(
       user,
-      `Disputed ${target.expense.description}. Your ${fmt(target.cents)} won't count until ${this.nameOf(payer)} adds a receipt or takes you off it. ` +
+      `Disputed ${target.expense.description}${this.onTrip(user, trip)}. Your ${fmt(target.cents)} won't count until ${this.nameOf(payer)} adds a receipt or takes you off it. ` +
         `(Reply YES if you change your mind.)`,
     );
     this.store.setPending(payer.id, "awaiting_receipt", { expenseId: target.expense_id }, this.now());
     await this.say(
       payer,
-      `${this.nameOf(user)} disputed ${target.expense.description} (${fmt(target.cents)})${reason ? `: "${reason}"` : ""}. ` +
+      `${this.nameOf(user)} disputed ${target.expense.description}${this.onTrip(payer, trip)} (${fmt(target.cents)})${reason ? `: "${reason}"` : ""}. ` +
         `Send me a receipt photo, reply AGREE to take ${this.nameOf(user)} off it, or UNDO to remove the whole thing.`,
     );
   }
@@ -639,7 +816,7 @@ export class Tab {
 
     const dropped = this.store.user(who.user_id);
     await this.say(payer, `Done. ${this.nameOf(dropped)} is off ${expense.description}; it's now ${this.splitSummary(next, !even)}.`);
-    await this.say(dropped, `${this.nameOf(payer)} agreed: you're off ${expense.description}.`);
+    await this.say(dropped, `${this.nameOf(payer)} agreed: you're off ${expense.description}${this.onTrip(dropped, trip)}.`);
     for (const s of remaining) {
       if (s.user_id === payer.id) continue;
       const u = this.store.user(s.user_id);
@@ -651,8 +828,8 @@ export class Tab {
     }
   }
 
-  private async undo(user: User, trip: Trip) {
-    const e = this.store.lastExpenseBy(user.id, trip.id);
+  private async undo(user: User, trips: Trip[]) {
+    const e = this.store.lastExpenseByAcross(user.id, trips.map((t) => t.id));
     if (!e) return this.say(user, "You haven't logged anything I can undo.");
     const affected = this.store.shares(e.id).filter((s) => s.user_id !== user.id);
     this.store.deleteExpense(e.id);
@@ -823,6 +1000,9 @@ export class Tab {
           ? ` · view on Solana: ${this.chain.explorerUrl(sent[0]!.sig)}`
           : `\n${sent.map((s) => `${this.nameOf(s.to)}: ${this.chain.explorerUrl(s.sig)}`).join("\n")}`;
       await this.say(user, `✅ Sent ${fmt(sentTotal)} USDC: ${parts}${links}`);
+      if (!tripLedger(this.store, trip.id).plan.length) {
+        await this.say(user, `That squares up ${trip.name}. Text "close ${shortTripName(trip).toLowerCase()}" when you're done with it.`);
+      }
       for (const s of sent) {
         await this.say(s.to, `💸 ${this.nameOf(me)} paid you ${fmt(s.cents)} USDC for ${trip.name}. ${this.chain.explorerUrl(s.sig)}`);
       }
@@ -850,6 +1030,7 @@ export class Tab {
         `• UNDO removes your last expense, LINK shares the invite`,
         `• "remind Jake" (or "remind everyone") texts them what they owe you`,
         `• "call me Sam" fixes your name`,
+        `• In more than one trip? Add the name: "$80 gas, florida". TRIPS lists them, "close florida" ends one`,
       ].join("\n"),
     );
   }
@@ -863,6 +1044,7 @@ export class Tab {
     // One running-total reminder a day (reminderGapMs) for anyone who owes, and only if they
     // haven't been told their total in that window already (expense texts, TOTAL, "remind X").
     for (const trip of this.store.allTrips()) {
+      if (trip.closed_at) continue;
       const { net } = tripLedger(this.store, trip.id);
       for (const [userId, cents] of net) {
         if (cents >= 0) continue;
@@ -882,6 +1064,11 @@ export class Tab {
 
   private async say(user: User, text: string) {
     await this.messenger.send(user.phone, text);
+  }
+
+  /** " on Nyc Trip" when the recipient is in more than one open trip, else "". */
+  private onTrip(user: User, trip: Trip): string {
+    return this.store.openTripsFor(user.id).length > 1 ? ` on ${trip.name}` : "";
   }
 
   private nameOf(user: User): string {
@@ -975,4 +1162,13 @@ export class Tab {
   pageLink(trip: Trip): string {
     return `${this.cfg.publicUrl}/t/${trip.code}`;
   }
+}
+
+/** "Florida Trip" -> "Florida" for prompts like 'say "$80 gas, florida"'. */
+function shortTripName(trip: Trip): string {
+  return trip.name.replace(/\s+trip$/i, "") || trip.name;
+}
+
+function escapeRe(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
