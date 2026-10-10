@@ -33,7 +33,7 @@ Tab:   ✅ Sent $59.50 USDC: Amit $52.50, Priya $7 · view on Solana
 - **Running totals:** every share counts as soon as it's logged. Each person gets one text with their share and their running total per person, netted (if you paid for lunch and they paid for drinks, you only see the difference).
 - **Disputes:** DISPUTE + reason pulls your share out until the payer adds a receipt or removes the expense. YES takes a dispute back. Nobody is ever asked to approve anything.
 - **Settling:** SETTLE finds the fewest payments, and PAY sends USDC from your Tab wallet.
-- **Reminders:** after a settle-up, Tab nudges anyone who still hasn't paid.
+- **Reminders:** one running-total text a day to anyone who owes, and never on top of a total they already got that day. "remind Jake" (or "remind everyone") texts them what they owe you right now.
 - **Trip page:** an installable mobile page. Tap your name to see your running total with every expense behind each number, plus everyone's balances, the settle plan, and on-chain payment links.
 
 ## Stack
@@ -87,4 +87,4 @@ The trip page is at `http://localhost:3000/t/<CODE>`.
 
 ## Commands Tab understands
 
-`new trip <name>` · `JOIN <code>` · receipt photos · "paid $X for Y" · `TOTAL` (or "what's my total") · `WHY` · `DISPUTE <reason>` · `YES` (takes a dispute back) · `SETTLE` · `PAY` · `UNDO` · `LINK` · `call me <name>` · `HELP`
+`new trip <name>` · `JOIN <code>` · receipt photos · "paid $X for Y" · `TOTAL` (or "what's my total") · `WHY` · `DISPUTE <reason>` · `YES` (takes a dispute back) · `remind <name|everyone>` · `SETTLE` · `PAY` · `UNDO` · `LINK` · `call me <name>` · `HELP`

@@ -117,6 +117,8 @@ export class Tab {
     if (cmd === "UNDO") return this.undo(user, trip);
     if (/^(LINK|TRIP|INVITE)$/.test(cmd)) return this.link(user, trip);
     if (cmd === "HELP") return this.help(user);
+    const remind = text.match(/^(?:remind|nudge|poke)\s+(.+?)[.!]*$/i);
+    if (remind) return this.remind(user, trip, remind[1]!);
 
     if (msg.images.length) return this.receiptExpense(user, trip, msg);
 
@@ -484,6 +486,7 @@ export class Tab {
           `Running total: ${this.runningLine(u.id, trip.id)}. ${REPLY_HINT}`,
       );
       this.store.markNotified(expense.id, u.id, now);
+      this.store.setPaymentNudge(trip.id, u.id, now);
     }
   }
 
@@ -599,6 +602,40 @@ export class Tab {
     const mine = net.get(user.id) ?? 0;
     const bottom = mine < 0 ? `Net: you owe ${fmt(-mine)}. Reply PAY to settle up or WHY for every line.` : mine > 0 ? `Net: you're owed ${fmt(mine)}.` : `Net: all square 🎉`;
     await this.say(user, `${trip.name} running total: ${this.runningLine(user.id, trip.id)}.\n${bottom}\nEverything, line by line: ${this.pageLink(trip)}`);
+    this.store.setPaymentNudge(trip.id, user.id, this.now());
+  }
+
+  /** "remind Jake" / "remind everyone": text people who owe the sender their running total. */
+  private async remind(user: User, trip: Trip, who: string) {
+    const members = this.store.members(trip.id);
+    const names = who.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean);
+    const ids = this.resolveNames(names, members, user);
+    if ("error" in ids) return this.say(user, ids.error);
+    const targets = ids.ids.filter((id) => id !== user.id);
+    if (!targets.length) return this.say(user, `Who should I remind? e.g. "remind Jake" or "remind everyone".`);
+
+    const now = this.now();
+    const reminded: string[] = [];
+    const square: string[] = [];
+    for (const id of targets) {
+      const owesMe = pairwise(this.store, trip.id, id).find((p) => p.other === user.id)?.cents ?? 0;
+      if (owesMe <= 0) {
+        square.push(this.nameOf(this.store.user(id)));
+        continue;
+      }
+      const target = this.store.user(id);
+      await this.say(
+        target,
+        `👋 ${this.nameOf(user)} asked me to remind you: you owe ${this.nameOf(user)} ${fmt(owesMe)} for ${trip.name}. ` +
+          `Running total: ${this.runningLine(id, trip.id)}. Reply PAY to settle up or WHY for every line.`,
+      );
+      this.store.setPaymentNudge(trip.id, id, now);
+      reminded.push(`${this.nameOf(target)} (${fmt(owesMe)})`);
+    }
+    const parts: string[] = [];
+    if (reminded.length) parts.push(`Reminded ${listNames(reminded)}.`);
+    if (square.length) parts.push(`${listNames(square)} ${square.length === 1 ? "doesn't" : "don't"} owe you anything right now.`);
+    await this.say(user, parts.join(" "));
   }
 
   /** "you owe Amit $20.00 and Priya $32.00 · Sam owes you $7.50" */
@@ -707,6 +744,7 @@ export class Tab {
         `• TOTAL shows your running total per person, WHY explains every line`,
         `• SETTLE works out who pays whom, PAY sends it`,
         `• UNDO removes your last expense, LINK shares the invite`,
+        `• "remind Jake" (or "remind everyone") texts them what they owe you`,
         `• "call me Sam" fixes your name`,
       ].join("\n"),
     );
@@ -718,18 +756,20 @@ export class Tab {
   async runJobs(): Promise<void> {
     const now = this.now();
 
-    // After a settle-up, nudge anyone who still hasn't paid.
+    // One running-total reminder a day (reminderGapMs) for anyone who owes, and only if they
+    // haven't been told their total in that window already (expense texts, TOTAL, "remind X").
     for (const trip of this.store.allTrips()) {
-      if (!trip.settle_requested_at) continue;
-      const { plan } = tripLedger(this.store, trip.id);
-      for (const debtor of new Set(plan.map((d) => d.from))) {
-        const last = this.store.lastPaymentNudge(trip.id, debtor) ?? trip.settle_requested_at;
+      const { net } = tripLedger(this.store, trip.id);
+      for (const [userId, cents] of net) {
+        if (cents >= 0) continue;
+        const last = this.store.lastPaymentNudge(trip.id, userId) ?? trip.created_at;
         if (now - last < this.cfg.reminderGapMs) continue;
         await this.say(
-          this.store.user(debtor),
-          `Reminder: you owe ${this.debtList(plan.filter((d) => d.from === debtor))} for ${trip.name}. Reply PAY to settle in one tap.`,
+          this.store.user(userId),
+          `Daily total for ${trip.name}: ${this.runningLine(userId, trip.id)}. Net: you owe ${fmt(-cents)}. ` +
+            `Reply PAY to settle up, WHY for every line, or DISPUTE + reason if something's off.`,
         );
-        this.store.setPaymentNudge(trip.id, debtor, now);
+        this.store.setPaymentNudge(trip.id, userId, now);
       }
     }
   }

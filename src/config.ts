@@ -41,8 +41,8 @@ export const config = {
     startingBalanceCents: num("STARTING_BALANCE_CENTS", 500_00),
   },
 
-  /** Minimum gap between reminders for the same person. */
-  reminderGapMs: num("REMINDER_GAP_MINUTES", demo ? 3 : 24 * 60) * 60_000,
+  /** Gap between running-total reminders for the same person (daily by default, even in demo). */
+  reminderGapMs: num("REMINDER_GAP_MINUTES", 24 * 60) * 60_000,
   /** How often the background job runs. */
   jobIntervalMs: num("JOB_INTERVAL_SECONDS", demo ? 30 : 15 * 60) * 1000,
 };

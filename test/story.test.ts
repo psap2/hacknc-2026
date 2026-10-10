@@ -182,12 +182,25 @@ describe("the Asheville trip", () => {
     await say(JAKE, "PAY");
     expect(m.last(JAKE)).toBe("You don't owe anything right now 🎉");
 
-    // A day later Sam still hasn't paid -> payment reminder. Nobody gets approval reminders.
+    // Reminders: one running-total text a day, only for people who owe, and never twice in a day.
     m.clear();
+    await bot.runJobs();
+    expect(m.all(SAM)).toHaveLength(0); // settle-up told Sam his total minutes ago
     now += 25 * 3600_000;
     await bot.runJobs();
-    expect(m.all(SAM).join("\n")).toMatch(/^Reminder: you owe .* Reply PAY/m);
+    expect(m.all(SAM)).toHaveLength(1);
+    expect(m.last(SAM)).toMatch(/^Daily total for Asheville Trip: you owe .*Net: you owe \$29\.50\. Reply PAY/);
+    expect(m.all(JAKE)).toHaveLength(0); // paid up
+    expect(m.all(AMIT)).toHaveLength(0); // owed, not owing
+    await bot.runJobs();
+    expect(m.all(SAM)).toHaveLength(1);
+
+    // A creditor can poke someone directly; it only goes to people who actually owe them.
+    m.clear();
+    await say(PRIYA, "remind Sam and Jake");
+    expect(m.last(SAM)).toContain("👋 Priya asked me to remind you: you owe Priya $24.50 for Asheville Trip. Running total: you owe Amit $12.50 and Priya $24.50 · Jake owes you $7.50.");
     expect(m.all(JAKE)).toHaveLength(0);
+    expect(m.last(PRIYA)).toBe("Reminded Sam ($24.50). Jake doesn't owe you anything right now.");
   });
 
   it("nets what two people owe each other into one payment", async () => {
