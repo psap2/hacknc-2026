@@ -129,7 +129,7 @@ The sender ${ctx.hasImage ? "ALSO attached a receipt photo (so an expense is ver
 
 Classify the message:
 - expense: the sender paid for something to split, or asks to be paid back ("pay me $30", "gas, everyone", "dinner, me jake and sam").
-- why: asks why they owe / wants a breakdown.  - balance: asks what they owe or are owed.
+- why: asks why they owe / wants a breakdown.  - balance: asks what they owe or are owed, their total or running total, or where they stand.
 - settle: wants to settle up.  - pay: wants to pay what they owe.  - help: asks how Tab works.  - unknown: anything else.
 
 For expenses, work out who shares it:

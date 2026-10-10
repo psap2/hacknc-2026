@@ -39,7 +39,6 @@ const bot = new Tab({
     publicUrl: config.publicUrl,
     botPhone: config.botPhone,
     startingBalanceCents: config.solana.startingBalanceCents,
-    autoApproveMs: config.autoApproveMs,
     reminderGapMs: config.reminderGapMs,
   },
 });

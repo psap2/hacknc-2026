@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { Tab } from "../src/agent/bot.js";
 import { HeuristicAI } from "../src/ai/heuristic.js";
 import { openDb, Store } from "../src/ledger/db.js";
+import { tripLedger } from "../src/ledger/settle.js";
 import type { Receipt } from "../src/ledger/split.js";
 import type { Inbound, InboundHandler, Messenger } from "../src/messaging/types.js";
 import { MockChain } from "../src/solana/chain.js";
@@ -81,7 +82,6 @@ describe("the Asheville trip", () => {
         publicUrl: "https://tab.test",
         botPhone: "",
         startingBalanceCents: 50000,
-        autoApproveMs: 48 * 3600_000,
         reminderGapMs: 24 * 3600_000,
       },
     });
@@ -112,77 +112,111 @@ describe("the Asheville trip", () => {
     // Everyone got a funded wallet without seeing any crypto.
     for (const p of [AMIT, JAKE, PRIYA, SAM]) expect(await chain.balance(store.userByPhone(p)!.pubkey!)).toBe(50000);
 
-    // Amit: gas receipt, everyone
+    // Amit: gas receipt, everyone. Shares count immediately; nobody is asked to approve.
     ai.receipts.push(receipt("Shell", [["Gas", 8000]]));
     await say(AMIT, "gas, everyone", [PHOTO]);
-    expect(m.last(AMIT)).toBe(
-      "Logged to Asheville Trip: Gas $80.00 · split 4 ways ($20 each) · 🧾 receipt matched. I've asked Jake, Priya, and Sam to OK their shares.",
+    expect(m.last(AMIT)).toBe("Logged to Asheville Trip: Gas $80.00 · split 4 ways ($20 each) · 🧾 receipt matched. I've told Jake, Priya, and Sam.");
+    expect(m.last(JAKE)).toBe(
+      "Amit logged Gas $80.00 (🧾 receipt) · your share $20.00. Running total: you owe Amit $20.00. Reply DISPUTE + reason if that's wrong, or TOTAL to see where you stand.",
     );
-    expect(m.last(JAKE)).toBe("Amit logged Gas $80.00 (🧾 receipt). Your share: $20.00. Reply YES, DISPUTE + reason, or WHY.");
     await say(JAKE, "YES");
-    expect(m.last(JAKE)).toBe("✅ Approved.");
+    expect(m.last(JAKE)).toContain("No need to approve anything");
 
-    // Priya: dinner without Amit
+    // Priya: dinner without Amit. Jake's running total now spans two people.
     m.clear();
     ai.receipts.push(receipt("Tupelo Honey", [["Shrimp & Grits", 3000], ["Burger", 2800], ["Salad", 2200]], 800, 800));
     await say(PRIYA, "dinner, me jake and sam, I didn't eat with Amit", [PHOTO]);
     expect(m.last(PRIYA)).toContain("Dinner $96.00 · split 3 ways ($32 each)");
     expect(m.all(AMIT)).toHaveLength(0);
-    expect(m.last(SAM)).toContain("Your share: $32.00");
+    expect(m.last(JAKE)).toContain("your share $32.00. Running total: you owe Amit $20.00 and Priya $32.00.");
 
     // Sam: "pay me $30" -> asks what for -> firewood, no receipt
     await say(SAM, "pay me $30");
     expect(m.last(SAM)).toBe("What was the $30 for? A receipt photo helps.");
     await say(SAM, "firewood");
-    expect(m.last(SAM)).toBe(
-      "Logged to Asheville Trip: Firewood $30.00 · split 4 ways ($7.50 each) · ⚠️ no receipt. Everyone has to approve it themselves.",
-    );
+    expect(m.last(SAM)).toBe("Logged to Asheville Trip: Firewood $30.00 · split 4 ways ($7.50 each) · ⚠️ no receipt. I've told Amit, Jake, and Priya.");
+    // Amit's text nets what Sam owes him against what he now owes Sam.
+    expect(m.last(AMIT)).toContain("Running total: Jake owes you $20.00, Priya owes you $20.00, and Sam owes you $12.50.");
 
-    // Amit disputes
+    // Amit disputes the firewood (by name, so it doesn't matter that it isn't his latest).
     await say(AMIT, "DISPUTE I don't remember any firewood");
-    expect(m.last(AMIT)).toBe("Disputed. I asked Sam for a receipt or a fix. Your $7.50 won't count until it's sorted.");
+    expect(m.last(AMIT)).toBe(
+      "Disputed Firewood. Your $7.50 won't count until Sam adds a receipt or removes it. Running total: Jake owes you $20.00, Priya owes you $20.00, and Sam owes you $20.00. (Reply YES if you change your mind.)",
+    );
     expect(m.last(SAM)).toContain(`Amit disputed Firewood ($7.50): "I don't remember any firewood"`);
 
-    // Sam sends the receipt -> everyone re-asked, Amit first
+    // Sam sends the receipt -> only the disputer hears about it, and the share counts again.
     m.clear();
     now += 24 * 3600_000; // Oct 12
     ai.receipts.push(receipt("Gas station", [["Firewood", 3000]]));
     await say(SAM, "", [PHOTO]);
-    expect(m.last(SAM)).toContain("🧾 Receipt added to Firewood");
-    expect(m.last(AMIT)).toBe("Sam added a receipt for Firewood $30.00. Your share: $7.50. Reply YES, DISPUTE + reason, or WHY.");
-    expect([...m.inbox.keys()].indexOf(AMIT)).toBeLessThan([...m.inbox.keys()].indexOf(JAKE));
+    expect(m.last(SAM)).toBe("🧾 Receipt added to Firewood. Amit is counted again.");
+    expect(m.last(AMIT)).toContain("Sam added a receipt for Firewood $30.00, so your $7.50 counts again.");
+    expect(m.all(JAKE)).toHaveLength(0);
 
-    // Jake approves dinner, then asks why
-    await say(JAKE, "yes");
-    expect(m.last(JAKE)).toContain("✅ Approved Dinner. Next: Firewood $7.50 (Sam)");
+    // Jake asks why, then for his total.
     await say(JAKE, "why do I owe so much");
     const why = m.last(JAKE);
-    expect(why).toContain("• $20.00 to Amit: Gas ($80 ÷ 4), receipt Oct 11, you approved");
-    expect(why).toContain("• $32.00 to Priya: Dinner ($96 ÷ 3), receipt Oct 11, you approved");
-    expect(why).toContain("• $7.50 to Sam: Firewood ($30 ÷ 4), receipt added Oct 12, still waiting on your OK");
+    expect(why).toContain("You owe $59.50 total:");
+    expect(why).toContain("• $20.00 to Amit: Gas ($80 ÷ 4), receipt Oct 11, counted");
+    expect(why).toContain("• $32.00 to Priya: Dinner ($96 ÷ 3), receipt Oct 11, counted");
+    expect(why).toContain("• $7.50 to Sam: Firewood ($30 ÷ 4), receipt added Oct 12, counted");
+    await say(JAKE, "what's my total");
+    expect(m.last(JAKE)).toContain("Asheville Trip running total: you owe Amit $20.00, Priya $32.00, and Sam $7.50.");
+    expect(m.last(JAKE)).toContain("Net: you owe $59.50.");
+    expect(m.last(JAKE)).toContain("https://tab.test/t/");
 
-    // Priya settles; only approved shares count
+    // Priya settles: fewest payments, everything counted. Jake's $59.50 is routed as
+    // $52.50 to Amit + $7 to Priya (two payments) rather than one per person he owes.
     m.clear();
     await say(PRIYA, "SETTLE");
-    expect(m.last(JAKE)).toContain("You owe Priya $32.00 and Amit $20.00 for Asheville Trip.");
+    expect(m.last(JAKE)).toContain("You owe Amit $52.50 and Priya $7.00 for Asheville Trip.");
     expect(m.last(JAKE)).toContain("Reply PAY to send USDC");
-    expect(m.last(JAKE)).toContain("1 expense still waiting on your OK isn't included yet.");
 
     // Jake pays
     await say(JAKE, "PAY");
-    expect(m.last(JAKE)).toMatch(/^✅ Sent \$52\.00 USDC: Priya \$32, Amit \$20/);
-    expect(m.last(AMIT)).toContain("💸 Jake paid you $20.00 USDC");
-    expect(m.last(PRIYA)).toContain("💸 Jake paid you $32.00 USDC");
-    expect(await chain.balance(store.userByPhone(JAKE)!.pubkey!)).toBe(50000 - 5200);
+    expect(m.last(JAKE)).toMatch(/^✅ Sent \$59\.50 USDC: Amit \$52\.50, Priya \$7\n/);
+    expect(m.last(AMIT)).toContain("💸 Jake paid you $52.50 USDC");
+    expect(m.last(PRIYA)).toContain("💸 Jake paid you $7.00 USDC");
+    expect(await chain.balance(store.userByPhone(JAKE)!.pubkey!)).toBe(50000 - 5950);
     await say(JAKE, "PAY");
     expect(m.last(JAKE)).toBe("You don't owe anything right now 🎉");
 
-    // A day after dinner was logged, Sam still hasn't approved it -> reminder (before the 48h auto-approve)
+    // A day later Sam still hasn't paid -> payment reminder. Nobody gets approval reminders.
     m.clear();
-    now += 1 * 3600_000;
+    now += 25 * 3600_000;
     await bot.runJobs();
-    expect(m.all(SAM).join("\n")).toContain("Dinner $32.00 (Priya)");
-    expect(m.all(SAM).join("\n")).toMatch(/^Reminder: \d+ expenses? needs? your OK/m);
+    expect(m.all(SAM).join("\n")).toMatch(/^Reminder: you owe .* Reply PAY/m);
+    expect(m.all(JAKE)).toHaveLength(0);
+  });
+
+  it("nets what two people owe each other into one payment", async () => {
+    await setupTrip();
+    const trip = store.userByPhone(AMIT)!.active_trip_id!;
+    await say(JAKE, "paid $40 for lunch, me and Priya");
+    await say(PRIYA, "paid $50 for drinks, me and Jake");
+    // Jake owes Priya $25, Priya owes Jake $20 -> Jake owes Priya $5. One payment, not two.
+    expect(m.last(JAKE)).toContain("Running total: you owe Priya $5.00.");
+    const { plan } = tripLedger(store, trip);
+    expect(plan).toEqual([{ from: store.userByPhone(JAKE)!.id, to: store.userByPhone(PRIYA)!.id, cents: 500 }]);
+    await say(PRIYA, "TOTAL");
+    expect(m.last(PRIYA)).toContain("running total: Jake owes you $5.00.");
+    expect(m.last(PRIYA)).toContain("Net: you're owed $5.00.");
+  });
+
+  it("a dispute stops the share counting until it's resolved, and YES takes it back", async () => {
+    await setupTrip();
+    await say(SAM, "paid 30 for firewood");
+    const trip = store.userByPhone(AMIT)!.active_trip_id!;
+    const firewood = store.expenses(trip)[0]!;
+    expect(store.shares(firewood.id).every((s) => s.status === "approved")).toBe(true);
+    await say(AMIT, "DISPUTE never saw it");
+    expect(store.shares(firewood.id).find((s) => s.user_id === store.userByPhone(AMIT)!.id)!.status).toBe("disputed");
+    expect(tripLedger(store, trip).net.get(store.userByPhone(AMIT)!.id)).toBe(0);
+    await say(AMIT, "yes");
+    expect(m.last(AMIT)).toContain("Counting Firewood $7.50 again");
+    expect(m.last(SAM)).toContain("Amit is fine with Firewood after all");
+    expect(tripLedger(store, trip).net.get(store.userByPhone(AMIT)!.id)).toBe(-750);
   });
 
   it("supports split by item", async () => {
@@ -198,19 +232,6 @@ describe("the Asheville trip", () => {
     const shares = store.shares(e.id);
     expect(shares.reduce((a, s) => a + s.cents, 0)).toBe(5400);
     expect(shares).toHaveLength(4);
-  });
-
-  it("auto-approves receipt-backed shares but never no-receipt ones", async () => {
-    await setupTrip();
-    ai.receipts.push(receipt("Shell", [["Gas", 8000]]));
-    await say(AMIT, "gas, everyone", [PHOTO]);
-    await say(SAM, "paid 30 for firewood");
-    now += 49 * 3600_000;
-    await bot.runJobs();
-    const trip = store.userByPhone(AMIT)!.active_trip_id!;
-    const [gas, firewood] = store.expenses(trip);
-    expect(store.shares(gas!.id).every((s) => s.status === "approved")).toBe(true);
-    expect(store.shares(firewood!.id).filter((s) => s.status === "pending")).toHaveLength(3);
   });
 
   it("tells strangers how to start", async () => {

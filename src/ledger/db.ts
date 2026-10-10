@@ -145,6 +145,9 @@ export function openDb(path: string): DB {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA);
+  // Shares used to wait for a YES; now they count as soon as they're logged. Fold over any
+  // rows left in the old state so existing trips add up (safe to run every boot).
+  db.prepare("UPDATE shares SET status = 'approved', decided_at = COALESCE(decided_at, ?) WHERE status = 'pending'").run(Date.now());
   return db;
 }
 
@@ -298,40 +301,27 @@ export class Store {
   markNotified(expenseId: number, userId: number, now: number) {
     this.db.prepare("UPDATE shares SET notified_at = ? WHERE expense_id = ? AND user_id = ?").run(now, expenseId, userId);
   }
-  markReminded(expenseId: number, userId: number, now: number) {
-    this.db.prepare("UPDATE shares SET reminded_at = ? WHERE expense_id = ? AND user_id = ?").run(now, expenseId, userId);
-  }
-  /** Shares a user still has to approve or dispute, oldest first. Excludes their own expenses. */
-  pendingSharesFor(userId: number, tripId: number): (Share & { expense: Expense })[] {
+  /** A person's counted shares on others' expenses, newest expense first (for DISPUTE). */
+  approvedSharesFor(userId: number, tripId: number): (Share & { expense: Expense })[] {
     const rows = this.db
       .prepare(
         `SELECT s.* FROM shares s JOIN expenses e ON e.id = s.expense_id
-         WHERE s.user_id = ? AND e.trip_id = ? AND e.status = 'active' AND s.status = 'pending' AND e.payer_id != s.user_id
-         ORDER BY COALESCE(s.notified_at, e.created_at), e.id`,
+         WHERE s.user_id = ? AND e.trip_id = ? AND e.status = 'active' AND s.status = 'approved' AND e.payer_id != s.user_id
+         ORDER BY e.created_at DESC, e.id DESC`,
       )
       .all(userId, tripId) as Share[];
     return rows.map((s) => ({ ...s, expense: this.expense(s.expense_id) }));
   }
-  /** All pending, non-payer shares across trips (for the background job). */
-  allPendingShares(): (Share & { expense: Expense })[] {
+  /** A person's open disputes, newest first (so YES can take one back). */
+  disputedSharesFor(userId: number, tripId: number): (Share & { expense: Expense })[] {
     const rows = this.db
       .prepare(
         `SELECT s.* FROM shares s JOIN expenses e ON e.id = s.expense_id
-         WHERE e.status = 'active' AND s.status = 'pending' AND e.payer_id != s.user_id`,
+         WHERE s.user_id = ? AND e.trip_id = ? AND e.status = 'active' AND s.status = 'disputed' AND e.payer_id != s.user_id
+         ORDER BY s.decided_at DESC, e.id DESC`,
       )
-      .all() as Share[];
+      .all(userId, tripId) as Share[];
     return rows.map((s) => ({ ...s, expense: this.expense(s.expense_id) }));
-  }
-  /** Most recently approved share (not their own expense), so DISPUTE works after an auto-approve. */
-  lastApprovedShareFor(userId: number, tripId: number): (Share & { expense: Expense }) | undefined {
-    const s = this.db
-      .prepare(
-        `SELECT s.* FROM shares s JOIN expenses e ON e.id = s.expense_id
-         WHERE s.user_id = ? AND e.trip_id = ? AND e.status = 'active' AND s.status = 'approved' AND e.payer_id != s.user_id
-         ORDER BY s.decided_at DESC, e.id DESC LIMIT 1`,
-      )
-      .get(userId, tripId) as Share | undefined;
-    return s ? { ...s, expense: this.expense(s.expense_id) } : undefined;
   }
   /** The payer's most recent expense that has an open dispute. */
   disputedExpenseFor(payerId: number, tripId: number): Expense | undefined {

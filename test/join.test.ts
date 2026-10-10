@@ -36,7 +36,7 @@ function setup(m: Messenger) {
     ai: new HeuristicAI(),
     chain: new MockChain(),
     now: () => Date.parse("2026-10-11T12:00:00Z"),
-    config: { botName: "Tab", publicUrl: "https://tab.test", botPhone: "", startingBalanceCents: 500_00, autoApproveMs: 0, reminderGapMs: 0 },
+    config: { botName: "Tab", publicUrl: "https://tab.test", botPhone: "", startingBalanceCents: 500_00, reminderGapMs: 0 },
   });
   return { store, bot };
 }

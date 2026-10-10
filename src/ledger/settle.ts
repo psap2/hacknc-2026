@@ -81,3 +81,53 @@ export function breakdownFor(store: Store, tripId: number, userId: number) {
   const received = store.transfers(tripId).filter((t) => t.to_id === userId);
   return { lines, paid, received };
 }
+
+export interface PairLine {
+  expense: Expense;
+  cents: number;
+  /** "i_owe": my share of their expense. "they_owe": their share of mine. */
+  direction: "i_owe" | "they_owe";
+  status: Share["status"];
+}
+
+export interface Pair {
+  other: number;
+  /** Positive: I owe them this much. Negative: they owe me. Only approved shares count. */
+  cents: number;
+  lines: PairLine[];
+  paid: number;
+  received: number;
+}
+
+/**
+ * Running sum between one person and each other member, with the lines behind it, so a
+ * "you owe Amit $45" can always be traced back to specific expenses and payments.
+ */
+export function pairwise(store: Store, tripId: number, userId: number): Pair[] {
+  const expenses = store.expenses(tripId).map((e) => ({ expense: e, shares: store.shares(e.id) }));
+  const transfers = store.transfers(tripId);
+  return store
+    .members(tripId)
+    .filter((m) => m.id !== userId)
+    .map((m) => {
+      const lines: PairLine[] = [];
+      let cents = 0;
+      for (const { expense, shares } of expenses) {
+        if (expense.payer_id === m.id) {
+          const mine = shares.find((s) => s.user_id === userId);
+          if (!mine) continue;
+          lines.push({ expense, cents: mine.cents, direction: "i_owe", status: mine.status });
+          if (mine.status === "approved") cents += mine.cents;
+        } else if (expense.payer_id === userId) {
+          const theirs = shares.find((s) => s.user_id === m.id);
+          if (!theirs) continue;
+          lines.push({ expense, cents: theirs.cents, direction: "they_owe", status: theirs.status });
+          if (theirs.status === "approved") cents -= theirs.cents;
+        }
+      }
+      const paid = transfers.filter((t) => t.from_id === userId && t.to_id === m.id).reduce((a, t) => a + t.cents, 0);
+      const received = transfers.filter((t) => t.from_id === m.id && t.to_id === userId).reduce((a, t) => a + t.cents, 0);
+      return { other: m.id, cents: cents - paid + received, lines, paid, received };
+    })
+    .filter((p) => p.cents !== 0 || p.lines.length > 0);
+}

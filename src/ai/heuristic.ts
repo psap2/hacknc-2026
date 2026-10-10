@@ -59,7 +59,7 @@ export function heuristicDescription(text: string, memberNames: string[]): strin
 export function heuristicIntent(text: string, ctx: InterpretContext): Intent {
   const t = text.trim();
   if (/\bwhy\b|how much do i owe|breakdown/i.test(t)) return { kind: "why" };
-  if (/^(balance|balances|what do i owe|status)\b/i.test(t)) return { kind: "balance" };
+  if (/^(balance|balances|total|totals|what do i owe|status)\b|\b(my|running) total\b|where do i stand/i.test(t)) return { kind: "balance" };
   const amountCents = heuristicAmount(t);
   if (amountCents !== null || ctx.hasImage) {
     return {

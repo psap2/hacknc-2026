@@ -41,8 +41,6 @@ export const config = {
     startingBalanceCents: num("STARTING_BALANCE_CENTS", 500_00),
   },
 
-  /** Receipt-backed shares auto-approve after this long. No-receipt shares never do. */
-  autoApproveMs: num("AUTO_APPROVE_MINUTES", demo ? 5 : 48 * 60) * 60_000,
   /** Minimum gap between reminders for the same person. */
   reminderGapMs: num("REMINDER_GAP_MINUTES", demo ? 3 : 24 * 60) * 60_000,
   /** How often the background job runs. */

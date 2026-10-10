@@ -1,17 +1,16 @@
 import type { AI, InterpretContext, SplitSpec } from "../ai/types.js";
 import type { Expense, Store, Trip, User } from "../ledger/db.js";
-import { breakdownFor, tripLedger } from "../ledger/settle.js";
+import { breakdownFor, pairwise, tripLedger } from "../ledger/settle.js";
 import { type Receipt, receiptLooksConsistent, splitEven, splitItems } from "../ledger/split.js";
 import type { Inbound, Messenger } from "../messaging/types.js";
 import type { Chain } from "../solana/chain.js";
-import { fmt, listNames, money, plural, shortDate, titleCase } from "./format.js";
+import { fmt, listNames, money, shortDate, titleCase } from "./format.js";
 
 export interface BotConfig {
   botName: string;
   publicUrl: string;
   botPhone: string;
   startingBalanceCents: number;
-  autoApproveMs: number;
   reminderGapMs: number;
 }
 
@@ -34,7 +33,7 @@ type PendingState =
   | { kind: "awaiting_receipt"; expenseId: number };
 
 const EVERYONE: SplitSpec = { mode: "everyone", names: [], includeSender: true };
-const REPLY_HINT = "Reply YES, DISPUTE + reason, or WHY.";
+const REPLY_HINT = "Reply DISPUTE + reason if that's wrong, or TOTAL to see where you stand.";
 
 export class Tab {
   private readonly store: Store;
@@ -56,7 +55,21 @@ export class Tab {
 
   // ------------------------------------------------------------------ entry points
 
+  /** One message at a time per person, so a quick double-text can't race the pending state. */
+  private queues = new Map<string, Promise<void>>();
+
   async handle(msg: Inbound): Promise<void> {
+    const prev = this.queues.get(msg.phone) ?? Promise.resolve();
+    const run = prev.catch(() => {}).then(() => this.handleNow(msg));
+    this.queues.set(msg.phone, run);
+    try {
+      await run;
+    } finally {
+      if (this.queues.get(msg.phone) === run) this.queues.delete(msg.phone);
+    }
+  }
+
+  private async handleNow(msg: Inbound): Promise<void> {
     const user = this.store.upsertUser(msg.phone, this.now());
     const text = msg.text.trim();
     const cmd = text.toUpperCase().replace(/[.!?]+$/, "");
@@ -100,7 +113,7 @@ export class Tab {
     if (cmd === "WHY") return this.why(user, trip);
     if (/^(SETTLE|SETTLE UP)$/.test(cmd)) return this.settle(user, trip);
     if (cmd === "PAY") return this.pay(user, trip);
-    if (/^(BALANCE|BALANCES)$/.test(cmd)) return this.balance(user, trip);
+    if (/^(BALANCE|BALANCES|TOTAL|TOTALS|MY TOTAL|RUNNING TOTAL|STATUS)$/.test(cmd)) return this.balance(user, trip);
     if (cmd === "UNDO") return this.undo(user, trip);
     if (/^(LINK|TRIP|INVITE)$/.test(cmd)) return this.link(user, trip);
     if (cmd === "HELP") return this.help(user);
@@ -148,6 +161,13 @@ export class Tab {
     void this.greetAfterWebJoin(user, trip, wasMember).catch((err) =>
       console.error(`[join] couldn't text ${phone}; they can text JOIN ${trip.code} to ${line ?? "the bot"}:`, (err as Error).message),
     );
+    return { line };
+  }
+
+  /** Start page: register a brand-new organizer so their first text reaches us. Returns their Tab number. */
+  async startByPhone(phone: string): Promise<{ line?: string }> {
+    const line = await this.messenger.register(phone);
+    this.store.upsertUser(phone, this.now());
     return { line };
   }
 
@@ -439,7 +459,7 @@ export class Tab {
         now,
       );
       for (const [userId, cents] of split) {
-        this.store.setShare(e.id, userId, cents, userId === payer.id ? "approved" : "pending", now);
+        this.store.setShare(e.id, userId, cents, "approved", now);
       }
       return e;
     });
@@ -450,21 +470,18 @@ export class Tab {
       : receipt && receiptLooksConsistent(receipt) && receipt.total_cents === totalCents
         ? "🧾 receipt matched"
         : "🧾 receipt";
-    const ask = !others.length
-      ? "Nobody else is on this one."
-      : hasReceipt
-        ? `I've asked ${listNames(others.map((u) => this.nameOf(u)))} to OK their share${others.length > 1 ? "s" : ""}.`
-        : "Everyone has to approve it themselves.";
+    const told = !others.length ? "Nobody else is on this one." : `I've told ${listNames(others.map((u) => this.nameOf(u)))}.`;
     await this.say(
       payer,
-      `Logged to ${trip.name}: ${expense.description} ${fmt(totalCents)} · ${this.splitSummary(split, byItem)} · ${receiptTag}${note}. ${ask}`,
+      `Logged to ${trip.name}: ${expense.description} ${fmt(totalCents)} · ${this.splitSummary(split, byItem)} · ${receiptTag}${note}. ${told}`,
     );
 
     const tag = hasReceipt ? "🧾 receipt" : "⚠️ no receipt";
     for (const u of others) {
       await this.say(
         u,
-        `${this.nameOf(payer)} logged ${expense.description} ${fmt(totalCents)} (${tag}). Your share: ${fmt(split.get(u.id)!)}. ${REPLY_HINT}`,
+        `${this.nameOf(payer)} logged ${expense.description} ${fmt(totalCents)} (${tag}) · your share ${fmt(split.get(u.id)!)}. ` +
+          `Running total: ${this.runningLine(u.id, trip.id)}. ${REPLY_HINT}`,
       );
       this.store.markNotified(expense.id, u.id, now);
     }
@@ -484,22 +501,22 @@ export class Tab {
   private async attachReceipt(payer: User, trip: Trip, expense: Expense, msg: Inbound) {
     const receipt = await this.readReceipt(msg);
     const now = this.now();
-    const shares = this.store.shares(expense.id).filter((s) => s.user_id !== payer.id);
-    // Disputers hear about it first.
-    shares.sort((a, b) => Number(b.status === "disputed") - Number(a.status === "disputed"));
+    const disputers = this.store.shares(expense.id).filter((s) => s.user_id !== payer.id && s.status === "disputed");
     this.store.tx(() => {
       this.store.attachReceipt(expense.id, receipt ? JSON.stringify(receipt) : null, now);
-      for (const s of shares) this.store.setShare(expense.id, s.user_id, s.cents, "pending", now);
+      for (const s of disputers) this.store.decideShare(expense.id, s.user_id, "approved", null, now);
     });
     const mismatch =
       receipt && receipt.total_cents !== expense.total_cents
         ? ` Heads up: the receipt says ${fmt(receipt.total_cents)} but the expense is ${fmt(expense.total_cents)}. Reply UNDO and log it again if that's wrong.`
         : "";
-    await this.say(payer, `🧾 Receipt added to ${expense.description}. I've asked everyone to OK it again.${mismatch}`);
-    for (const s of shares) {
+    const settled = disputers.length ? ` ${listNames(disputers.map((s) => this.nameOf(this.store.user(s.user_id))))} ${disputers.length === 1 ? "is" : "are"} counted again.` : "";
+    await this.say(payer, `🧾 Receipt added to ${expense.description}.${settled}${mismatch}`);
+    for (const s of disputers) {
       await this.say(
         this.store.user(s.user_id),
-        `${this.nameOf(payer)} added a receipt for ${expense.description} ${fmt(expense.total_cents)}. Your share: ${fmt(s.cents)}. ${REPLY_HINT}`,
+        `${this.nameOf(payer)} added a receipt for ${expense.description} ${fmt(expense.total_cents)}, so your ${fmt(s.cents)} counts again. ` +
+          `Running total: ${this.runningLine(s.user_id, trip.id)}. Reply DISPUTE + reason if it's still wrong.`,
       );
       this.store.markNotified(expense.id, s.user_id, now);
     }
@@ -508,25 +525,28 @@ export class Tab {
   // ------------------------------------------------------------------ approvals
 
   private async approve(user: User, trip: Trip) {
-    const queue = this.store.pendingSharesFor(user.id, trip.id);
-    const first = queue[0];
-    if (!first) return this.say(user, "Nothing is waiting for your OK 👍");
-    this.store.decideShare(first.expense_id, user.id, "approved", null, this.now());
-    const next = queue[1];
-    const more = next
-      ? ` Next: ${next.expense.description} ${fmt(next.cents)} (${this.nameOf(this.store.user(next.expense.payer_id))}). ${REPLY_HINT}`
-      : "";
-    await this.say(user, `✅ Approved${queue.length > 1 ? ` ${first.expense.description}` : ""}.${more}`);
+    const disputed = this.store.disputedSharesFor(user.id, trip.id)[0];
+    if (disputed) {
+      this.store.decideShare(disputed.expense_id, user.id, "approved", null, this.now());
+      const payer = this.store.user(disputed.expense.payer_id);
+      this.store.clearPending(payer.id);
+      await this.say(user, `👍 Counting ${disputed.expense.description} ${fmt(disputed.cents)} again. Running total: ${this.runningLine(user.id, trip.id)}.`);
+      return this.say(payer, `${this.nameOf(user)} is fine with ${disputed.expense.description} after all. No receipt needed.`);
+    }
+    await this.say(user, `No need to approve anything: shares count as soon as they're logged. ${REPLY_HINT}`);
   }
 
   private async dispute(user: User, trip: Trip, reason: string) {
-    const target = this.store.pendingSharesFor(user.id, trip.id)[0] ?? this.store.lastApprovedShareFor(user.id, trip.id);
+    const candidates = this.store.approvedSharesFor(user.id, trip.id);
+    const words = reason.toLowerCase().match(/[a-z]{3,}/g) ?? [];
+    const target = candidates.find((s) => words.some((w) => s.expense.description.toLowerCase().includes(w))) ?? candidates[0];
     if (!target) return this.say(user, "There's nothing of yours to dispute right now.");
     this.store.decideShare(target.expense_id, user.id, "disputed", reason || null, this.now());
     const payer = this.store.user(target.expense.payer_id);
     await this.say(
       user,
-      `Disputed. I asked ${this.nameOf(payer)} for a receipt or a fix. Your ${fmt(target.cents)} won't count until it's sorted.`,
+      `Disputed ${target.expense.description}. Your ${fmt(target.cents)} won't count until ${this.nameOf(payer)} adds a receipt or removes it. ` +
+        `Running total: ${this.runningLine(user.id, trip.id)}. (Reply YES if you change your mind.)`,
     );
     this.store.setPending(payer.id, "awaiting_receipt", { expenseId: target.expense_id }, this.now());
     await this.say(
@@ -566,8 +586,7 @@ export class Tab {
       const proof = e.has_receipt
         ? `${e.receipt_at && e.receipt_at - e.created_at > 60_000 ? "receipt added" : "receipt"} ${shortDate(e.receipt_at ?? e.created_at)}`
         : `no receipt, ${shortDate(e.created_at)}`;
-      const status =
-        l.share.status === "approved" ? "you approved" : l.share.status === "pending" ? "still waiting on your OK" : "you disputed it (not counted)";
+      const status = l.share.status === "disputed" ? "you disputed it (not counted)" : "counted";
       return `• ${fmt(l.share.cents)} to ${this.nameOf(this.store.user(l.payerId))}: ${e.description} (${how}), ${proof}, ${status}`;
     });
     const paidTotal = paid.reduce((a, t) => a + t.cents, 0);
@@ -576,18 +595,21 @@ export class Tab {
   }
 
   private async balance(user: User, trip: Trip) {
-    const { net, plan } = tripLedger(this.store, trip.id);
+    const { net } = tripLedger(this.store, trip.id);
     const mine = net.get(user.id) ?? 0;
-    const waiting = this.store.pendingSharesFor(user.id, trip.id).length;
-    const debts = plan.filter((d) => d.from === user.id);
-    let msg =
-      mine < 0
-        ? `You owe ${this.debtList(debts)} for ${trip.name}. Reply PAY to settle or WHY for the breakdown.`
-        : mine > 0
-          ? `You're owed ${fmt(mine)} on ${trip.name}.`
-          : `You're all square on ${trip.name} 🎉`;
-    if (waiting) msg += ` (${plural(waiting, "expense")} still waiting on your OK ${waiting === 1 ? "isn't" : "aren't"} counted yet.)`;
-    await this.say(user, msg);
+    const bottom = mine < 0 ? `Net: you owe ${fmt(-mine)}. Reply PAY to settle up or WHY for every line.` : mine > 0 ? `Net: you're owed ${fmt(mine)}.` : `Net: all square 🎉`;
+    await this.say(user, `${trip.name} running total: ${this.runningLine(user.id, trip.id)}.\n${bottom}\nEverything, line by line: ${this.pageLink(trip)}`);
+  }
+
+  /** "you owe Amit $20.00 and Priya $32.00 · Sam owes you $7.50" */
+  private runningLine(userId: number, tripId: number): string {
+    const pairs = pairwise(this.store, tripId, userId);
+    const owe = pairs.filter((p) => p.cents > 0).map((p) => `${this.nameOf(this.store.user(p.other))} ${fmt(p.cents)}`);
+    const owed = pairs.filter((p) => p.cents < 0).map((p) => `${this.nameOf(this.store.user(p.other))} owes you ${fmt(-p.cents)}`);
+    const parts: string[] = [];
+    if (owe.length) parts.push(`you owe ${listNames(owe)}`);
+    if (owed.length) parts.push(listNames(owed));
+    return parts.length ? parts.join(" · ") : "you're all square";
   }
 
   private debtList(debts: { to: number; cents: number }[]): string {
@@ -604,12 +626,10 @@ export class Tab {
     const creditors = [...new Set(plan.map((d) => d.to))];
     for (const id of debtors) {
       const u = this.store.user(id);
-      const waiting = this.store.pendingSharesFor(id, trip.id).length;
-      const note = waiting ? `\n(${plural(waiting, "expense")} still waiting on your OK ${waiting === 1 ? "isn't" : "aren't"} included yet.)` : "";
       await this.say(
         u,
         `You owe ${this.debtList(plan.filter((d) => d.from === id))} for ${trip.name}.\n` +
-          `• Reply PAY to send USDC from your ${this.cfg.botName} wallet\n• Reply WHY for the breakdown.${note}`,
+          `• Reply PAY to send USDC from your ${this.cfg.botName} wallet\n• Reply WHY for the breakdown.`,
       );
       this.store.setPaymentNudge(trip.id, id, now);
     }
@@ -682,9 +702,9 @@ export class Tab {
       [
         `Here's what I can do:`,
         `• Send a receipt photo (add "everyone", "me, Jake and Sam", or "by item")`,
-        `• "paid $40 for snacks" logs an expense`,
-        `• YES / DISPUTE + reason to approve or push back on your share`,
-        `• WHY explains what you owe, BALANCE shows where you stand`,
+        `• "paid $40 for snacks" logs an expense; everyone's share counts right away`,
+        `• DISPUTE + reason if a share is wrong (YES takes it back)`,
+        `• TOTAL shows your running total per person, WHY explains every line`,
         `• SETTLE works out who pays whom, PAY sends it`,
         `• UNDO removes your last expense, LINK shares the invite`,
         `• "call me Sam" fixes your name`,
@@ -698,36 +718,7 @@ export class Tab {
   async runJobs(): Promise<void> {
     const now = this.now();
 
-    // 1) Receipt-backed shares auto-approve after a grace period. No-receipt shares never do.
-    for (const s of this.store.allPendingShares()) {
-      if (!s.expense.has_receipt) continue;
-      const since = Math.max(s.notified_at ?? s.expense.created_at, s.expense.receipt_at ?? 0);
-      if (now - since < this.cfg.autoApproveMs) continue;
-      this.store.decideShare(s.expense_id, s.user_id, "approved", null, now);
-      await this.say(
-        this.store.user(s.user_id),
-        `✅ Auto-approved ${s.expense.description}: your ${fmt(s.cents)} share (receipt on file). Reply DISPUTE if that's wrong.`,
-      );
-    }
-
-    // 2) Nudge people with approvals waiting.
-    const byUserTrip = new Map<string, ReturnType<Store["allPendingShares"]>>();
-    for (const s of this.store.allPendingShares()) {
-      const last = s.reminded_at ?? s.notified_at ?? s.expense.created_at;
-      if (now - last < this.cfg.reminderGapMs) continue;
-      const key = `${s.user_id}:${s.expense.trip_id}`;
-      byUserTrip.set(key, [...(byUserTrip.get(key) ?? []), s]);
-    }
-    for (const shares of byUserTrip.values()) {
-      const items = shares.map((s) => `${s.expense.description} ${fmt(s.cents)} (${this.nameOf(this.store.user(s.expense.payer_id))})`);
-      await this.say(
-        this.store.user(shares[0]!.user_id),
-        `Reminder: ${plural(shares.length, "expense")} ${shares.length === 1 ? "needs" : "need"} your OK: ${items.join("; ")}. Reply YES, DISPUTE, or WHY.`,
-      );
-      for (const s of shares) this.store.markReminded(s.expense_id, s.user_id, now);
-    }
-
-    // 3) After a settle-up, nudge anyone who still hasn't paid.
+    // After a settle-up, nudge anyone who still hasn't paid.
     for (const trip of this.store.allTrips()) {
       if (!trip.settle_requested_at) continue;
       const { plan } = tripLedger(this.store, trip.id);
