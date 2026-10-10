@@ -137,8 +137,8 @@ export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: num
     <rect x="72" y="508" width="${Math.min(1000, 60 + cta.length * 19)}" height="64" rx="32" fill="#fff"/>
     <text x="102" y="551" font-size="30" font-weight="700" fill="#6b3df5">${escXml(cta)}</text>
   </g></svg>`;
-  app.get("/og/:code{[A-Za-z0-9]+}.png", async (c) => {
-    const trip = store.tripByCode(c.req.param("code") ?? "");
+  app.get("/og/:file", async (c) => {
+    const trip = store.tripByCode((c.req.param("file") ?? "").replace(/\.png$/i, ""));
     if (!trip) return c.notFound();
     const { members, expenses } = tripLedger(store, trip.id);
     const total = expenses.reduce((a, { expense }) => a + expense.total_cents, 0);

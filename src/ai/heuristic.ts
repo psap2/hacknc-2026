@@ -50,9 +50,10 @@ export function heuristicAmount(text: string): number | null {
 }
 
 export function heuristicDescription(text: string, memberNames: string[]): string | null {
-  let s = text.split(/[,.;!\n]/)[0] ?? "";
+  // Strip money first so the comma in "2,400" or the dot in "12.50" doesn't end the sentence early.
+  const noMoney = text.replace(/\$?\s*\d+(?:\.\d+)?\s*k\b/gi, " ").replace(/\$?\s*\d[\d,]*(?:\.\d{1,2})?/g, " ");
+  let s = noMoney.split(/[,.;!\n]/)[0] ?? "";
   s = s
-    .replace(/\$?\s*\d[\d,]*(?:\.\d{1,2})?/g, " ")
     .replace(/\b(i|we|paid|pay|me|you|for|on|the|a|an|spent|bought|got|owe|split|it|this|is|was|total|everyone|evenly|ways|with|and)\b/gi, " ");
   for (const n of memberNames) s = s.replace(new RegExp(`\\b${escape(n)}\\b`, "gi"), " ");
   s = s.replace(/\s+/g, " ").trim();

@@ -98,6 +98,12 @@ describe("heuristicAmount (keyword fallback when Gemini is unavailable)", () => 
     expect(heuristicAmount("flights were 1.2k")).toBe(120000);
     expect(heuristicAmount("paid 30 for firewood")).toBe(3000);
   });
+  it("keeps the description when the amount has a comma", () => {
+    const ctx = { senderName: "Amit", memberNames: ["Amit", "Jake"], hasImage: false };
+    const i = heuristicIntent("i paid 2,400 for flights", ctx);
+    expect(i).toMatchObject({ kind: "expense", amountCents: 240000, description: "Flights" });
+    expect(heuristicIntent("paid $2,400 for flights, everyone", ctx)).toMatchObject({ description: "Flights", split: { mode: "everyone" } });
+  });
   it("doesn't mistake counts for money", () => {
     expect(heuristicAmount("split 4 ways")).toBeNull();
     expect(heuristicAmount("dinner for 3 people")).toBeNull();
