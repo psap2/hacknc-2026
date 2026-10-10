@@ -87,6 +87,19 @@ describe("joining from the web invite", () => {
     expect(m.to(AMIT).at(-1)).toBe("Ayug joined Asheville Trip 🎉");
   });
 
+  it("lets a person fix a wrong name with 'call me'", async () => {
+    const m = new GatedMessenger(undefined);
+    const { store, bot } = setup(m);
+    const trip = await makeTrip(bot, store);
+    await bot.handle({ phone: JAKE, text: `JOIN ${trip.code}`, images: [] });
+    await bot.handle({ phone: JAKE, text: "Jake", images: [] });
+    await bot.handle({ phone: JAKE, text: "call me Ayug", images: [] });
+    expect(store.userByPhone(JAKE)!.name).toBe("Ayug");
+    expect(m.to(JAKE).at(-1)).toContain("Ayug");
+    await bot.handle({ phone: JAKE, text: "paid $40 for snacks", images: [] });
+    expect(m.to(AMIT).at(-1)).toContain("Ayug"); // approvals use the new name
+  });
+
   it("accepts JOIN with or without a space before the code", async () => {
     const m = new GatedMessenger(undefined);
     const { store, bot } = setup(m);

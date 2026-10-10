@@ -67,6 +67,14 @@ export class Tab {
     const newTrip = text.match(/^(?:new|start|create)\s+(?:a\s+)?trip\s*:?\s*(.+)$/i);
     if (newTrip) return this.createTrip(user, newTrip[1]!);
 
+    const rename = text.match(/^(?:call me|my name is|i'?m|im|rename me(?: to)?|name:?)\s+([A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*)?)[.!]*$/i);
+    if (rename) {
+      const name = titleCase(rename[1]!).slice(0, 30);
+      this.store.setUserName(user.id, name);
+      this.store.clearPending(user.id);
+      return this.say(user, `Got it, I'll call you ${name} from now on.`);
+    }
+
     const pending = this.store.getPending<PendingState>(user.id);
     if (pending && (await this.continuePending(user, { kind: pending.kind, ...(pending.payload as object) } as PendingState, msg))) {
       return;
@@ -679,6 +687,7 @@ export class Tab {
         `• WHY explains what you owe, BALANCE shows where you stand`,
         `• SETTLE works out who pays whom, PAY sends it`,
         `• UNDO removes your last expense, LINK shares the invite`,
+        `• "call me Sam" fixes your name`,
       ].join("\n"),
     );
   }
