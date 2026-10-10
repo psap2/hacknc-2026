@@ -115,9 +115,9 @@ describe("the Asheville trip", () => {
     // Amit: gas receipt, everyone. Shares count immediately; nobody is asked to approve.
     ai.receipts.push(receipt("Shell", [["Gas", 8000]]));
     await say(AMIT, "gas, everyone", [PHOTO]);
-    expect(m.last(AMIT)).toBe("Logged to Asheville Trip: Gas $80.00 · split 4 ways ($20 each) · 🧾 receipt matched. I've told Jake, Priya, and Sam.");
+    expect(m.last(AMIT)).toBe("Logged to Asheville Trip: Gas $80.00 · split 4 ways ($20 each). I've told Jake, Priya, and Sam.");
     expect(m.last(JAKE)).toBe(
-      "Amit logged Gas $80.00 (🧾 receipt) · your share $20.00. Running total: you owe Amit $20.00. Reply DISPUTE + reason if that's wrong, or TOTAL to see where you stand.",
+      "Amit logged Gas $80.00 · your share $20.00. Reply DISPUTE + reason if that's wrong.",
     );
     await say(JAKE, "YES");
     expect(m.last(JAKE)).toContain("No need to approve anything");
@@ -128,20 +128,23 @@ describe("the Asheville trip", () => {
     await say(PRIYA, "dinner, me jake and sam, I didn't eat with Amit", [PHOTO]);
     expect(m.last(PRIYA)).toContain("Dinner $96.00 · split 3 ways ($32 each)");
     expect(m.all(AMIT)).toHaveLength(0);
-    expect(m.last(JAKE)).toContain("your share $32.00. Running total: you owe Amit $20.00 and Priya $32.00.");
+    expect(m.last(JAKE)).toContain("your share $32.00.");
+    expect(m.last(JAKE)).not.toContain("Running total");
 
     // Sam: "pay me $30" -> asks what for -> firewood, no receipt
     await say(SAM, "pay me $30");
     expect(m.last(SAM)).toBe("What was the $30 for? A receipt photo helps.");
     await say(SAM, "firewood");
-    expect(m.last(SAM)).toBe("Logged to Asheville Trip: Firewood $30.00 · split 4 ways ($7.50 each) · ⚠️ no receipt. I've told Amit, Jake, and Priya.");
-    // Amit's text nets what Sam owes him against what he now owes Sam.
-    expect(m.last(AMIT)).toContain("Running total: Jake owes you $20.00, Priya owes you $20.00, and Sam owes you $12.50.");
+    expect(m.last(SAM)).toBe("Logged to Asheville Trip: Firewood $30.00 · split 4 ways ($7.50 each). I've told Amit, Jake, and Priya.");
+    // Per-expense texts stay short; TOTAL nets what Sam owes Amit against what Amit now owes Sam.
+    expect(m.last(AMIT)).toBe("Sam logged Firewood $30.00 · your share $7.50. Reply DISPUTE + reason if that's wrong.");
+    await say(AMIT, "TOTAL");
+    expect(m.last(AMIT)).toContain("running total: Jake owes you $20.00, Priya owes you $20.00, and Sam owes you $12.50.");
 
     // Amit disputes the firewood (by name, so it doesn't matter that it isn't his latest).
     await say(AMIT, "DISPUTE I don't remember any firewood");
     expect(m.last(AMIT)).toBe(
-      "Disputed Firewood. Your $7.50 won't count until Sam adds a receipt or removes it. Running total: Jake owes you $20.00, Priya owes you $20.00, and Sam owes you $20.00. (Reply YES if you change your mind.)",
+      "Disputed Firewood. Your $7.50 won't count until Sam adds a receipt or takes you off it. (Reply YES if you change your mind.)",
     );
     expect(m.last(SAM)).toContain(`Amit disputed Firewood ($7.50): "I don't remember any firewood"`);
 
@@ -150,7 +153,7 @@ describe("the Asheville trip", () => {
     now += 24 * 3600_000; // Oct 12
     ai.receipts.push(receipt("Gas station", [["Firewood", 3000]]));
     await say(SAM, "", [PHOTO]);
-    expect(m.last(SAM)).toBe("🧾 Receipt added to Firewood. Amit is counted again.");
+    expect(m.last(SAM)).toBe("Receipt added to Firewood. Amit is counted again.");
     expect(m.last(AMIT)).toContain("Sam added a receipt for Firewood $30.00, so your $7.50 counts again.");
     expect(m.all(JAKE)).toHaveLength(0);
 
@@ -209,7 +212,8 @@ describe("the Asheville trip", () => {
     await say(JAKE, "paid $40 for lunch, me and Priya");
     await say(PRIYA, "paid $50 for drinks, me and Jake");
     // Jake owes Priya $25, Priya owes Jake $20 -> Jake owes Priya $5. One payment, not two.
-    expect(m.last(JAKE)).toContain("Running total: you owe Priya $5.00.");
+    await say(JAKE, "TOTAL");
+    expect(m.last(JAKE)).toContain("running total: you owe Priya $5.00.");
     const { plan } = tripLedger(store, trip);
     expect(plan).toEqual([{ from: store.userByPhone(JAKE)!.id, to: store.userByPhone(PRIYA)!.id, cents: 500 }]);
     await say(PRIYA, "TOTAL");

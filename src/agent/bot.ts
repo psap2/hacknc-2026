@@ -35,7 +35,7 @@ type PendingState =
   | { kind: "awaiting_receipt"; expenseId: number };
 
 const EVERYONE: SplitSpec = { mode: "everyone", names: [], includeSender: true };
-const REPLY_HINT = "Reply DISPUTE + reason if that's wrong, or TOTAL to see where you stand.";
+const REPLY_HINT = "Reply DISPUTE + reason if that's wrong.";
 
 export class Tab {
   private readonly store: Store;
@@ -277,7 +277,7 @@ export class Tab {
   }
 
   private welcomeTip() {
-    return `Text me receipts or things like "paid $40 for snacks." I'll keep track.`;
+    return `Text me receipts or things like "paid $40 for snacks." I'll keep track; text TOTAL any time to see where you stand.`;
   }
 
   /** Every member gets a custodial devnet wallet with test USDC. Nobody sees the crypto side. */
@@ -528,24 +528,11 @@ export class Tab {
     });
 
     const others = [...split.keys()].filter((id) => id !== payer.id).map((id) => this.store.user(id));
-    const receiptTag = !hasReceipt
-      ? "⚠️ no receipt"
-      : receipt && receiptLooksConsistent(receipt) && receipt.total_cents === totalCents
-        ? "🧾 receipt matched"
-        : "🧾 receipt";
     const told = !others.length ? "Nobody else is on this one." : `I've told ${listNames(others.map((u) => this.nameOf(u)))}.`;
-    await this.say(
-      payer,
-      `Logged to ${trip.name}: ${expense.description} ${fmt(totalCents)} · ${this.splitSummary(split, byItem)} · ${receiptTag}${note}. ${told}`,
-    );
+    await this.say(payer, `Logged to ${trip.name}: ${expense.description} ${fmt(totalCents)} · ${this.splitSummary(split, byItem)}${note}. ${told}`);
 
-    const tag = hasReceipt ? "🧾 receipt" : "⚠️ no receipt";
     for (const u of others) {
-      await this.say(
-        u,
-        `${this.nameOf(payer)} logged ${expense.description} ${fmt(totalCents)} (${tag}) · your share ${fmt(split.get(u.id)!)}. ` +
-          `Running total: ${this.runningLine(u.id, trip.id)}. ${REPLY_HINT}`,
-      );
+      await this.say(u, `${this.nameOf(payer)} logged ${expense.description} ${fmt(totalCents)} · your share ${fmt(split.get(u.id)!)}. ${REPLY_HINT}`);
       this.store.markNotified(expense.id, u.id, now);
       this.store.setPaymentNudge(trip.id, u.id, now);
     }
@@ -575,12 +562,12 @@ export class Tab {
         ? ` Heads up: the receipt says ${fmt(receipt.total_cents)} but the expense is ${fmt(expense.total_cents)}. Reply UNDO and log it again if that's wrong.`
         : "";
     const settled = disputers.length ? ` ${listNames(disputers.map((s) => this.nameOf(this.store.user(s.user_id))))} ${disputers.length === 1 ? "is" : "are"} counted again.` : "";
-    await this.say(payer, `🧾 Receipt added to ${expense.description}.${settled}${mismatch}`);
+    await this.say(payer, `Receipt added to ${expense.description}.${settled}${mismatch}`);
     for (const s of disputers) {
       await this.say(
         this.store.user(s.user_id),
         `${this.nameOf(payer)} added a receipt for ${expense.description} ${fmt(expense.total_cents)}, so your ${fmt(s.cents)} counts again. ` +
-          `Running total: ${this.runningLine(s.user_id, trip.id)}. Reply DISPUTE + reason if it's still wrong.`,
+          `Reply DISPUTE + reason if it's still wrong.`,
       );
       this.store.markNotified(expense.id, s.user_id, now);
     }
@@ -594,7 +581,7 @@ export class Tab {
       this.store.decideShare(disputed.expense_id, user.id, "approved", null, this.now());
       const payer = this.store.user(disputed.expense.payer_id);
       this.store.clearPending(payer.id);
-      await this.say(user, `👍 Counting ${disputed.expense.description} ${fmt(disputed.cents)} again. Running total: ${this.runningLine(user.id, trip.id)}.`);
+      await this.say(user, `Counting ${disputed.expense.description} ${fmt(disputed.cents)} again.`);
       return this.say(payer, `${this.nameOf(user)} is fine with ${disputed.expense.description} after all. No receipt needed.`);
     }
     await this.say(user, `No need to approve anything: shares count as soon as they're logged. ${REPLY_HINT}`);
@@ -609,8 +596,8 @@ export class Tab {
     const payer = this.store.user(target.expense.payer_id);
     await this.say(
       user,
-      `Disputed ${target.expense.description}. Your ${fmt(target.cents)} won't count until ${this.nameOf(payer)} adds a receipt or removes it. ` +
-        `Running total: ${this.runningLine(user.id, trip.id)}. (Reply YES if you change your mind.)`,
+      `Disputed ${target.expense.description}. Your ${fmt(target.cents)} won't count until ${this.nameOf(payer)} adds a receipt or takes you off it. ` +
+        `(Reply YES if you change your mind.)`,
     );
     this.store.setPending(payer.id, "awaiting_receipt", { expenseId: target.expense_id }, this.now());
     await this.say(
@@ -652,14 +639,13 @@ export class Tab {
 
     const dropped = this.store.user(who.user_id);
     await this.say(payer, `Done. ${this.nameOf(dropped)} is off ${expense.description}; it's now ${this.splitSummary(next, !even)}.`);
-    await this.say(dropped, `${this.nameOf(payer)} agreed: you're off ${expense.description}. Running total: ${this.runningLine(dropped.id, trip.id)}.`);
+    await this.say(dropped, `${this.nameOf(payer)} agreed: you're off ${expense.description}.`);
     for (const s of remaining) {
       if (s.user_id === payer.id) continue;
       const u = this.store.user(s.user_id);
       await this.say(
         u,
-        `${this.nameOf(dropped)} came off ${expense.description} ${fmt(expense.total_cents)}, so your share is now ${fmt(next.get(s.user_id)!)}. ` +
-          `Running total: ${this.runningLine(u.id, trip.id)}. ${REPLY_HINT}`,
+        `${this.nameOf(dropped)} came off ${expense.description} ${fmt(expense.total_cents)}, so your share is now ${fmt(next.get(s.user_id)!)}. ${REPLY_HINT}`,
       );
       this.store.setPaymentNudge(trip.id, u.id, now);
     }

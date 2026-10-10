@@ -14,7 +14,7 @@ Tab:   Asheville Trip created! Paste this in your group chat:
        "Join our Asheville tab 👉 https://…/j/ASHE42"
 
 Amit:  [receipt photo] gas, everyone
-Tab:   Logged to Asheville Trip: Gas $80.00 · split 4 ways ($20 each) · 🧾 receipt matched.
+Tab:   Logged to Asheville Trip: Gas $80.00 · split 4 ways ($20 each).
        I've told Jake, Priya, and Sam.
 (Jake) Amit logged Gas $80.00 (🧾 receipt) · your share $20.00. Running total: you owe Amit $20.00.
        Reply DISPUTE + reason if that's wrong, or TOTAL to see where you stand.
