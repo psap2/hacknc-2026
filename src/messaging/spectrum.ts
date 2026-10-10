@@ -5,6 +5,13 @@ import type { Inbound, InboundHandler, Messenger } from "./types.js";
 
 /** Text and photos sent together arrive as separate messages; wait this long to merge them. */
 const MERGE_WINDOW_MS = 1500;
+/**
+ * Photon's gateway takes a minute or two to accept a person after the Users API registers
+ * them; until then every send fails with "Target not allowed for this project". Retry on that
+ * with these gaps (about two minutes total) before giving up.
+ */
+const NOT_ALLOWED_RETRY_MS = [5_000, 15_000, 30_000, 60_000];
+const isNotAllowed = (err: unknown) => /Target not allowed/i.test((err as Error)?.message ?? "");
 
 type SpectrumApp = Awaited<ReturnType<typeof Spectrum>>;
 
@@ -72,7 +79,17 @@ export class SpectrumMessenger implements Messenger {
       space = await imessage(this.app).space.create(phone);
       this.spaces.set(phone, space);
     }
-    await space.send(text);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await space.send(text);
+        return;
+      } catch (err) {
+        const wait = NOT_ALLOWED_RETRY_MS[attempt];
+        if (!isNotAllowed(err) || wait === undefined) throw err;
+        console.warn(`[spectrum] ${phone} not allowed yet; retrying in ${wait / 1000}s (attempt ${attempt + 1})`);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
   }
 
   async register(phone: string, name?: string): Promise<string | undefined> {

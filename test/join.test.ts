@@ -5,28 +5,28 @@ import { openDb, Store } from "../src/ledger/db.js";
 import type { InboundHandler, Messenger } from "../src/messaging/types.js";
 import { MockChain } from "../src/solana/chain.js";
 
-/** Refuses the first N sends to a phone, like Photon right after registering someone. */
-class FlakyMessenger implements Messenger {
+/** Refuses sends to a phone until `allow()` is called, like Photon right after registering someone. */
+class GatedMessenger implements Messenger {
   sent: [string, string][] = [];
-  failuresLeft = new Map<string, number>();
+  blocked = new Set<string>();
   constructor(private readonly line: string | undefined) {}
   async start(_: InboundHandler) {}
   async send(phone: string, text: string) {
-    const left = this.failuresLeft.get(phone) ?? 0;
-    if (left > 0) {
-      this.failuresLeft.set(phone, left - 1);
-      throw new Error("[spectrum-imessage] Target not allowed for this project");
-    }
+    if (this.blocked.has(phone)) throw new Error("[spectrum-imessage] Target not allowed for this project");
     this.sent.push([phone, text]);
   }
   async register() {
     return this.line;
   }
   async stop() {}
+  to(phone: string) {
+    return this.sent.filter(([p]) => p === phone).map(([, t]) => t);
+  }
 }
 
 const AMIT = "+15550000001";
 const JAKE = "+15550000002";
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 function setup(m: Messenger) {
   const store = new Store(openDb(":memory:"));
@@ -48,32 +48,51 @@ async function makeTrip(bot: Tab, store: Store) {
 }
 
 describe("joining from the web invite", () => {
-  it("texts the person when the platform allows it", async () => {
-    const m = new FlakyMessenger("+14155550100");
+  it("enrolls immediately, greets in the background, then asks for a name", async () => {
+    const m = new GatedMessenger("+14155550100");
     const { store, bot } = setup(m);
     const trip = await makeTrip(bot, store);
     const r = await bot.joinByPhone(JAKE, trip.code);
-    expect(r).toEqual({ texted: true, line: "+14155550100" });
-    expect(m.sent.at(-1)).toEqual([JAKE, expect.stringContaining("What should I call you?")]);
+    expect(r).toEqual({ line: "+14155550100" });
     expect(store.isMember(trip.id, store.userByPhone(JAKE)!.id)).toBe(true);
+    await flush();
+    expect(m.to(JAKE).at(-1)).toContain("What should I call you?");
+    await bot.handle({ phone: JAKE, text: "Jake", images: [] });
+    expect(m.to(AMIT).at(-1)).toBe("Jake joined Asheville Trip 🎉");
   });
 
-  it("retries once, then still enrolls and hands back the line to text", async () => {
-    const m = new FlakyMessenger("+14155550100");
-    m.failuresLeft.set(JAKE, 2); // first try + the one retry
+  it("when the greeting never lands, a hello is not taken as the name", async () => {
+    const m = new GatedMessenger("+14155550100");
+    m.blocked.add(JAKE);
     const { store, bot } = setup(m);
     const trip = await makeTrip(bot, store);
-    const r = await bot.joinByPhone(JAKE, trip.code);
-    expect(r).toEqual({ texted: false, line: "+14155550100" });
+    await bot.joinByPhone(JAKE, trip.code);
+    await flush();
     const jake = store.userByPhone(JAKE)!;
     expect(store.isMember(trip.id, jake.id)).toBe(true);
-    expect(m.sent.some(([p]) => p === JAKE)).toBe(false);
+    expect(store.getPending(jake.id)).toBeUndefined(); // nothing was asked, so nothing is pending
 
-    // When they text in, they're greeted and asked for a name rather than told "already in".
-    await bot.handle({ phone: JAKE, text: `JOIN ${trip.code}`, images: [] });
-    expect(m.sent.at(-1)).toEqual([JAKE, expect.stringContaining("What should I call you?")]);
-    await bot.handle({ phone: JAKE, text: "Jake", images: [] });
-    expect(store.user(jake.id).name).toBe("Jake");
-    expect(m.sent.at(-1)).toEqual([AMIT, "Jake joined Asheville Trip 🎉"]);
-  }, 10_000);
+    // A minute later Photon lets us through and Jake says hi first.
+    m.blocked.delete(JAKE);
+    await bot.handle({ phone: JAKE, text: "Hi", images: [] });
+    expect(store.user(jake.id).name).toBeNull();
+    expect(m.to(JAKE).at(-1)).toContain("What should I call you?");
+
+    await bot.handle({ phone: JAKE, text: "hey", images: [] }); // still not a name
+    expect(store.user(jake.id).name).toBeNull();
+    expect(m.to(JAKE).at(-1)).toContain("What should I call you?");
+
+    await bot.handle({ phone: JAKE, text: "Ayug", images: [] });
+    expect(store.user(jake.id).name).toBe("Ayug");
+    expect(m.to(AMIT).at(-1)).toBe("Ayug joined Asheville Trip 🎉");
+  });
+
+  it("accepts JOIN with or without a space before the code", async () => {
+    const m = new GatedMessenger(undefined);
+    const { store, bot } = setup(m);
+    const trip = await makeTrip(bot, store);
+    await bot.handle({ phone: JAKE, text: `JOIN${trip.code}`, images: [] });
+    expect(store.isMember(trip.id, store.userByPhone(JAKE)!.id)).toBe(true);
+    expect(m.to(JAKE).at(-1)).toContain("What should I call you?");
+  });
 });

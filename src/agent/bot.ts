@@ -61,7 +61,7 @@ export class Tab {
     const text = msg.text.trim();
     const cmd = text.toUpperCase().replace(/[.!?]+$/, "");
 
-    const join = cmd.match(/^JOIN\s+([A-Z0-9]{4,10})$/);
+    const join = cmd.match(/^JOIN\s*([A-Z0-9]{4,10})$/);
     if (join) return this.joinTrip(user, join[1]!);
 
     const newTrip = text.match(/^(?:new|start|create)\s+(?:a\s+)?trip\s*:?\s*(.+)$/i);
@@ -79,6 +79,11 @@ export class Tab {
         `Hi! I'm ${this.cfg.botName}. I split trip expenses so nobody has to chase anyone. ` +
           `Text "new trip <name>" to start one, or tap the invite link a friend sent you.`,
       );
+    }
+    if (!user.name) {
+      // Enrolled from the web invite but our greeting never reached them: whatever they just
+      // sent is a hello, not an answer. Greet now and ask properly.
+      return this.enroll(user, trip);
     }
 
     if (/^(YES|Y|YEP|YEAH|OK|OKAY|APPROVE|APPROVED|👍)$/.test(cmd)) return this.approve(user, trip);
@@ -120,30 +125,30 @@ export class Tab {
    * messaged can be refused by the platform right after registration, so we retry once and,
    * if it still fails, hand back the line they can text instead of failing the request.
    */
-  async joinByPhone(phone: string, code: string): Promise<{ texted: boolean; line?: string }> {
+  async joinByPhone(phone: string, code: string): Promise<{ line?: string }> {
     const line = await this.messenger.register(phone);
     const user = this.store.upsertUser(phone, this.now());
     const trip = this.store.tripByCode(code);
     if (!trip) throw new Error(`no trip with code ${code}`);
 
     const wasMember = this.store.isMember(trip.id, user.id);
-    const greeting = this.enroll(user, trip);
-    let lastErr: unknown;
-    for (const delayMs of [0, 3000]) {
-      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
-      try {
-        await this.say(user, greeting);
-        if (!wasMember && user.name) await this.announceJoin(user, trip);
-        await this.ensureWallet(user);
-        return { texted: true, line };
-      } catch (err) {
-        lastErr = err;
-        console.warn(`[join] text to ${phone} failed${delayMs ? " after retry" : ""}:`, (err as Error).message);
-      }
-    }
-    console.error(`[join] giving up texting ${phone}; they can text JOIN ${trip.code} to ${line ?? "the bot"}`, lastErr);
+    this.store.setActiveTrip(user.id, trip.id);
+    if (!wasMember) this.store.addMember(trip.id, user.id, this.now());
+
+    // Don't hold the web request: the messenger may spend a couple of minutes getting the
+    // first text through. The name question is only queued once a greeting actually lands.
+    void this.greetAfterWebJoin(user, trip, wasMember).catch((err) =>
+      console.error(`[join] couldn't text ${phone}; they can text JOIN ${trip.code} to ${line ?? "the bot"}:`, (err as Error).message),
+    );
+    return { line };
+  }
+
+  private async greetAfterWebJoin(user: User, trip: Trip, wasMember: boolean) {
     await this.ensureWallet(user);
-    return { texted: false, line };
+    const fresh = this.store.user(user.id);
+    if (fresh.name || this.store.getPending(user.id)) return; // they texted in first; handle() greeted them
+    await this.enroll(fresh, trip);
+    if (!wasMember && fresh.name) await this.announceJoin(fresh, trip);
   }
 
   // ------------------------------------------------------------------ trips & onboarding
@@ -168,29 +173,29 @@ export class Tab {
     const trip = this.store.tripByCode(code);
     if (!trip) return this.say(user, `I couldn't find a trip with code ${code.toUpperCase()}. Double-check the invite?`);
     const wasMember = this.store.isMember(trip.id, user.id);
-    await this.say(user, this.enroll(user, trip));
+    await this.enroll(user, trip);
     if (!wasMember && user.name) await this.announceJoin(user, trip);
     await this.ensureWallet(user);
   }
 
   /**
-   * Make the trip the person's active one and add them if needed (safe to repeat).
-   * Returns the greeting to send; a person without a name is asked for one.
+   * Make the trip the person's active one, add them if needed (safe to repeat), and greet them.
+   * A person without a name is asked for one, but only once the greeting has actually been
+   * delivered; otherwise their next text (usually "hi") would be taken as the answer.
    */
-  private enroll(user: User, trip: Trip): string {
+  private async enroll(user: User, trip: Trip): Promise<void> {
     const organizer = this.store.user(trip.organizer_id);
     this.store.setActiveTrip(user.id, trip.id);
     const already = this.store.isMember(trip.id, user.id);
     if (!already) this.store.addMember(trip.id, user.id, this.now());
+    const withWho = organizer.id === user.id ? "" : ` with ${organizer.name ?? "your friends"}`;
 
     if (!user.name) {
+      await this.say(user, `You're in ${trip.name}${withWho}! What should I call you?`);
       this.store.setPending(user.id, "awaiting_name", {}, this.now());
-      const withWho = organizer.id === user.id ? "" : ` with ${organizer.name ?? "your friends"}`;
-      return `You're in ${trip.name}${withWho}! What should I call you?`;
+      return;
     }
-    if (already) return `You're already in ${trip.name} 👍`;
-    const withWho = organizer.id === user.id ? "" : ` with ${organizer.name ?? "your friends"}`;
-    return `You're in ${trip.name}${withWho}! ${this.welcomeTip()}`;
+    await this.say(user, already ? `You're already in ${trip.name} 👍` : `You're in ${trip.name}${withWho}! ${this.welcomeTip()}`);
   }
 
   private async announceJoin(user: User, trip: Trip) {
@@ -226,6 +231,10 @@ export class Tab {
     switch (p.kind) {
       case "awaiting_name": {
         if (!text) return false;
+        if (/^(hi+|hey+|hello+|yo+|sup|hola|howdy|ok(ay)?|yes|yeah|yep|hi there|hey there|what'?s up|test(ing)?)[\s!.?]*$/i.test(text)) {
+          await this.say(user, `Hi! 👋 What should I call you? (Just your first name is fine.)`);
+          return true;
+        }
         const name = titleCase(text.replace(/^(i'?m|im|call me|it'?s|my name is)\s+/i, "").split(/\s+/).slice(0, 2).join(" ")).slice(0, 30);
         this.store.setUserName(user.id, name);
         this.store.clearPending(user.id);

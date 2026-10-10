@@ -62,16 +62,13 @@ export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: num
       console.error("[web] join failed", err);
       return c.html(page("Something broke", html`<h1>Something went wrong 😬</h1><p>Try again in a minute.</p>`), 500);
     }
-    if (result.texted) {
-      return c.html(page("Check your texts", html`<h1>Check your texts 📱</h1><p>${botName} just messaged you about ${trip.name}.</p>`));
-    }
     const where = result.line ? html`<a href="sms:${result.line}&body=JOIN%20${trip.code}">${result.line}</a>` : botName;
     return c.html(
       page(
-        "One more step",
+        "You're in",
         html`<h1>You're in ${trip.name} 🎉</h1>
-          <p>${botName} couldn't text you first, so say hi: text <b>JOIN ${trip.code}</b> to ${where}.</p>
-          <p class="muted">Save that number as "${botName}" so you can find it later.</p>`,
+          <p>${botName} will text you from ${where} in the next minute or two.</p>
+          <p class="muted">Save that number as "${botName}". If nothing arrives, text <b>JOIN ${trip.code}</b> to it.</p>`,
       ),
     );
   });
