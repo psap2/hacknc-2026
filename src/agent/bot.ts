@@ -113,11 +113,37 @@ export class Tab {
     }
   }
 
-  /** Web invite flow: someone typed their number on /j/:code. */
-  async joinByPhone(phone: string, code: string): Promise<void> {
-    await this.messenger.register(phone);
+  /**
+   * Web invite flow: someone typed their number on /j/:code.
+   *
+   * The person is enrolled in the trip either way. The first text to a number we have never
+   * messaged can be refused by the platform right after registration, so we retry once and,
+   * if it still fails, hand back the line they can text instead of failing the request.
+   */
+  async joinByPhone(phone: string, code: string): Promise<{ texted: boolean; line?: string }> {
+    const line = await this.messenger.register(phone);
     const user = this.store.upsertUser(phone, this.now());
-    await this.joinTrip(user, code);
+    const trip = this.store.tripByCode(code);
+    if (!trip) throw new Error(`no trip with code ${code}`);
+
+    const wasMember = this.store.isMember(trip.id, user.id);
+    const greeting = this.enroll(user, trip);
+    let lastErr: unknown;
+    for (const delayMs of [0, 3000]) {
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        await this.say(user, greeting);
+        if (!wasMember && user.name) await this.announceJoin(user, trip);
+        await this.ensureWallet(user);
+        return { texted: true, line };
+      } catch (err) {
+        lastErr = err;
+        console.warn(`[join] text to ${phone} failed${delayMs ? " after retry" : ""}:`, (err as Error).message);
+      }
+    }
+    console.error(`[join] giving up texting ${phone}; they can text JOIN ${trip.code} to ${line ?? "the bot"}`, lastErr);
+    await this.ensureWallet(user);
+    return { texted: false, line };
   }
 
   // ------------------------------------------------------------------ trips & onboarding
@@ -141,23 +167,30 @@ export class Tab {
   private async joinTrip(user: User, code: string) {
     const trip = this.store.tripByCode(code);
     if (!trip) return this.say(user, `I couldn't find a trip with code ${code.toUpperCase()}. Double-check the invite?`);
+    const wasMember = this.store.isMember(trip.id, user.id);
+    await this.say(user, this.enroll(user, trip));
+    if (!wasMember && user.name) await this.announceJoin(user, trip);
+    await this.ensureWallet(user);
+  }
+
+  /**
+   * Make the trip the person's active one and add them if needed (safe to repeat).
+   * Returns the greeting to send; a person without a name is asked for one.
+   */
+  private enroll(user: User, trip: Trip): string {
     const organizer = this.store.user(trip.organizer_id);
     this.store.setActiveTrip(user.id, trip.id);
+    const already = this.store.isMember(trip.id, user.id);
+    if (!already) this.store.addMember(trip.id, user.id, this.now());
 
-    if (this.store.isMember(trip.id, user.id)) {
-      return this.say(user, `You're already in ${trip.name} 👍`);
-    }
-    this.store.addMember(trip.id, user.id, this.now());
-
-    const withWho = organizer.id === user.id ? "" : ` with ${organizer.name ?? "your friends"}`;
     if (!user.name) {
       this.store.setPending(user.id, "awaiting_name", {}, this.now());
-      await this.say(user, `You're in ${trip.name}${withWho}! What should I call you?`);
-    } else {
-      await this.say(user, `You're in ${trip.name}${withWho}! ${this.welcomeTip()}`);
-      await this.announceJoin(user, trip);
+      const withWho = organizer.id === user.id ? "" : ` with ${organizer.name ?? "your friends"}`;
+      return `You're in ${trip.name}${withWho}! What should I call you?`;
     }
-    await this.ensureWallet(user);
+    if (already) return `You're already in ${trip.name} 👍`;
+    const withWho = organizer.id === user.id ? "" : ` with ${organizer.name ?? "your friends"}`;
+    return `You're in ${trip.name}${withWho}! ${this.welcomeTip()}`;
   }
 
   private async announceJoin(user: User, trip: Trip) {

@@ -74,8 +74,9 @@ export class SimMessenger implements Messenger {
     console.log(`  📱 → ${who}: ${indented}`);
   }
 
-  async register(phone: string): Promise<void> {
+  async register(phone: string): Promise<string | undefined> {
     if (!this.names.has(phone)) this.names.set(phone, phone);
+    return undefined;
   }
 
   async stop(): Promise<void> {

@@ -13,7 +13,9 @@ class FakeMessenger implements Messenger {
   async send(phone: string, text: string) {
     this.inbox.set(phone, [...(this.inbox.get(phone) ?? []), text]);
   }
-  async register() {}
+  async register() {
+    return undefined;
+  }
   async stop() {}
   last(phone: string) {
     return this.inbox.get(phone)?.at(-1) ?? "";

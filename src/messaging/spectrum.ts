@@ -12,7 +12,8 @@ export class SpectrumMessenger implements Messenger {
   private app: SpectrumApp | undefined;
   private spaces = new Map<string, Space>();
   private buffers = new Map<string, { msg: Inbound; timer: NodeJS.Timeout }>();
-  private registered = new Set<string>();
+  /** phone -> the Photon line assigned to that person (Pro shared pool gives each person their own). */
+  private lines = new Map<string, string | undefined>();
 
   constructor(private readonly creds: { projectId: string; projectSecret: string }) {}
 
@@ -74,11 +75,13 @@ export class SpectrumMessenger implements Messenger {
     await space.send(text);
   }
 
-  async register(phone: string, name?: string): Promise<void> {
-    if (this.registered.has(phone)) return;
+  async register(phone: string, name?: string): Promise<string | undefined> {
+    if (this.lines.has(phone)) return this.lines.get(phone);
     const user = await createSharedUser(this.creds, phone, name);
-    this.registered.add(phone);
-    console.log(`[spectrum] registered ${phone} (line ${user.assignedPhoneNumber ?? "shared"})`);
+    const line = user.assignedPhoneNumber ?? undefined;
+    this.lines.set(phone, line);
+    console.log(`[spectrum] registered ${phone} (line ${line ?? "shared"})`);
+    return line;
   }
 
   async stop(): Promise<void> {

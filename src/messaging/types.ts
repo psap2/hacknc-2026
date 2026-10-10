@@ -19,8 +19,11 @@ export type InboundHandler = (msg: Inbound) => Promise<void>;
 export interface Messenger {
   start(handler: InboundHandler): Promise<void>;
   send(phone: string, text: string): Promise<void>;
-  /** Make sure the platform will let us message this number (Photon user registration). */
-  register(phone: string, name?: string): Promise<void>;
+  /**
+   * Make sure the platform will let us message this number (Photon user registration).
+   * Resolves to the number this person should text us at, when the platform has one.
+   */
+  register(phone: string, name?: string): Promise<string | undefined>;
   stop(): Promise<void>;
 }
 

@@ -55,13 +55,25 @@ export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: num
     const form = await c.req.parseBody();
     const phone = toE164(String(form.phone ?? ""));
     if (!phone) return c.html(page("Try again", html`<h1>That number doesn't look right</h1><p><a href="/j/${code}">Try again</a></p>`), 400);
+    let result: Awaited<ReturnType<typeof bot.joinByPhone>>;
     try {
-      await bot.joinByPhone(phone, code);
+      result = await bot.joinByPhone(phone, code);
     } catch (err) {
       console.error("[web] join failed", err);
       return c.html(page("Something broke", html`<h1>Something went wrong 😬</h1><p>Try again in a minute.</p>`), 500);
     }
-    return c.html(page("Check your texts", html`<h1>Check your texts 📱</h1><p>${botName} just messaged you about ${trip.name}.</p>`));
+    if (result.texted) {
+      return c.html(page("Check your texts", html`<h1>Check your texts 📱</h1><p>${botName} just messaged you about ${trip.name}.</p>`));
+    }
+    const where = result.line ? html`<a href="sms:${result.line}&body=JOIN%20${trip.code}">${result.line}</a>` : botName;
+    return c.html(
+      page(
+        "One more step",
+        html`<h1>You're in ${trip.name} 🎉</h1>
+          <p>${botName} couldn't text you first, so say hi: text <b>JOIN ${trip.code}</b> to ${where}.</p>
+          <p class="muted">Save that number as "${botName}" so you can find it later.</p>`,
+      ),
+    );
   });
 
   // Read-only trip page: the shared view of everything (there's no group chat on Spectrum Pro).
