@@ -79,15 +79,39 @@ export class GeminiAI implements AI {
     this.client = new GoogleGenAI({ apiKey });
   }
 
+  /** Free-tier quotas are per model, so when one runs dry, move down this list for the rest of the day. */
+  private static readonly FALLBACKS = ["gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"];
+  private exhausted = new Map<string, number>(); // model -> when to try it again
+
+  private models(): string[] {
+    const now = Date.now();
+    const all = [this.model, ...GeminiAI.FALLBACKS.filter((m) => m !== this.model)];
+    const fresh = all.filter((m) => (this.exhausted.get(m) ?? 0) <= now);
+    return fresh.length ? fresh : all;
+  }
+
   private async json<T>(parts: object[], schema: object): Promise<T> {
-    const res = await this.client.models.generateContent({
-      model: this.model,
-      contents: [{ role: "user", parts }],
-      config: { responseMimeType: "application/json", responseJsonSchema: schema, temperature: 0 },
-    });
-    const text = res.text;
-    if (!text) throw new Error("Gemini returned no text");
-    return JSON.parse(text) as T;
+    let lastErr: unknown;
+    for (const model of this.models()) {
+      try {
+        const res = await this.client.models.generateContent({
+          model,
+          contents: [{ role: "user", parts }],
+          config: { responseMimeType: "application/json", responseJsonSchema: schema, temperature: 0 },
+        });
+        const text = res.text;
+        if (!text) throw new Error("Gemini returned no text");
+        return JSON.parse(text) as T;
+      } catch (err) {
+        lastErr = err;
+        const msg = String((err as Error)?.message ?? err);
+        if (!/429|RESOURCE_EXHAUSTED|quota/i.test(msg)) throw err;
+        const retry = Number(msg.match(/retry in (\d+(?:\.\d+)?)s|retryDelay":"(\d+)s/i)?.[1] ?? msg.match(/retryDelay":"(\d+)s/)?.[1] ?? 3600);
+        this.exhausted.set(model, Date.now() + Math.min(retry, 24 * 3600) * 1000);
+        console.warn(`[gemini] ${model} out of quota, trying the next model`);
+      }
+    }
+    throw lastErr;
   }
 
   async readReceipt(image: { bytes: Buffer; mimeType: string }): Promise<Receipt | null> {

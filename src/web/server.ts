@@ -61,9 +61,12 @@ const ICON_SVG = (size: number) =>
   <text x="50" y="66" text-anchor="middle" font-family="-apple-system,Helvetica,Arial,sans-serif" font-weight="800" font-size="52" fill="#fff">T</text>
 </svg>`;
 
-function shell(title: string, body: ReturnType<typeof html>, opts: { botName: string; description?: string }) {
+function shell(title: string, body: ReturnType<typeof html>, opts: { botName: string; description?: string; image?: string; url?: string }) {
+  const description = opts.description ?? `${opts.botName}: split trip costs over iMessage, settle on Solana.`;
   return html`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>${title}</title><meta name="description" content="${opts.description ?? `${opts.botName}: split trip costs over iMessage, settle on Solana.`}">
+<title>${title}</title><meta name="description" content="${description}">
+<meta property="og:type" content="website"><meta property="og:site_name" content="${opts.botName}"><meta property="og:title" content="${title}"><meta property="og:description" content="${description}">
+${opts.url ? html`<meta property="og:url" content="${opts.url}">` : ""}${opts.image ? html`<meta property="og:image" content="${opts.image}"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="${opts.image}">` : ""}
 <meta name="theme-color" content="#6b3df5"><link rel="manifest" href="/manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="${opts.botName}"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-180.png"><link rel="icon" href="/icon-180.png">
@@ -77,7 +80,13 @@ const smsLink = (line: string, body: string) => `sms:${line}?&body=${encodeURICo
 export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: number; botName: string }) {
   const { store, bot, chain, botName } = opts;
   const app = new Hono();
-  const page = (title: string, body: ReturnType<typeof html>, description?: string) => shell(title, body, { botName, description });
+  const page = (title: string, body: ReturnType<typeof html>, description?: string, extra: { image?: string; url?: string } = {}) =>
+    shell(title, body, { botName, description, ...extra });
+  const origin = (c: { req: { url: string } }) => {
+    const u = new URL(c.req.url);
+    const proto = u.hostname === "localhost" ? u.protocol : "https:";
+    return `${proto}//${u.host}`;
+  };
 
   // --- PWA bits: manifest + icons rendered from the SVG once.
   const icons = new Map<number, Promise<Buffer>>();
@@ -111,6 +120,34 @@ export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: num
   for (const size of [180, 512]) {
     app.get(`/icon-${size}.png`, async (c) => c.body(new Uint8Array(await icon(size)), 200, { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" }));
   }
+
+  // --- Link-preview card (1200x630) for a trip: what iMessage shows when the link is pasted.
+  const escXml = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[ch]!);
+  const cardSvg = (title: string, line1: string, line2: string, cta: string) => `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6b3df5"/><stop offset=".5" stop-color="#b23df5"/><stop offset="1" stop-color="#ff6a3d"/></linearGradient></defs>
+  <rect width="1200" height="630" fill="url(#g)"/>
+  <circle cx="1080" cy="560" r="260" fill="#ffffff" fill-opacity=".12"/><circle cx="120" cy="80" r="160" fill="#ffffff" fill-opacity=".08"/>
+  <g font-family="DejaVu Sans, Helvetica, Arial, sans-serif" fill="#fff">
+    <rect x="72" y="72" width="96" height="96" rx="24" fill="#fff" fill-opacity=".2"/>
+    <text x="120" y="139" text-anchor="middle" font-size="60" font-weight="700">T</text>
+    <text x="196" y="138" font-size="34" font-weight="700" opacity=".9">${escXml(botName)}</text>
+    <text x="72" y="330" font-size="${title.length > 18 ? 64 : 84}" font-weight="700" letter-spacing="-2">${escXml(title)}</text>
+    <text x="72" y="400" font-size="36" opacity=".92">${escXml(line1)}</text>
+    <text x="72" y="452" font-size="36" opacity=".92">${escXml(line2)}</text>
+    <rect x="72" y="508" width="${Math.min(1000, 60 + cta.length * 19)}" height="64" rx="32" fill="#fff"/>
+    <text x="102" y="551" font-size="30" font-weight="700" fill="#6b3df5">${escXml(cta)}</text>
+  </g></svg>`;
+  app.get("/og/:code{[A-Za-z0-9]+}.png", async (c) => {
+    const trip = store.tripByCode(c.req.param("code") ?? "");
+    if (!trip) return c.notFound();
+    const { members, expenses } = tripLedger(store, trip.id);
+    const total = expenses.reduce((a, { expense }) => a + expense.total_cents, 0);
+    const names = members.map((m) => m.name ?? "a friend");
+    const line1 = `${members.length} ${members.length === 1 ? "person" : "people"} · ${expenses.length} ${expenses.length === 1 ? "expense" : "expenses"} · ${fmt(total)} so far`;
+    const line2 = names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
+    const png = await sharp(Buffer.from(cardSvg(trip.name, line1, line2, `Join with code ${trip.code}`))).png().toBuffer();
+    return c.body(new Uint8Array(png), 200, { "Content-Type": "image/png", "Cache-Control": "public, max-age=60" });
+  });
 
   // --- Start page: the front door for an organizer. We register their number with Photon
   // (so their first text reaches us) and hand them the number to text.
@@ -168,7 +205,8 @@ export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: num
           <div class="card"><form method="post">
             <input name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="(919) 555-0123" required>
             <button class="primary">Text me</button></form></div>`,
-        `Join ${trip.name} on ${botName}`,
+        `${organizer.name ?? "A friend"} invited you to split costs on ${botName}. Tap to join.`,
+        { image: `${origin(c)}/og/${trip.code}.png`, url: `${origin(c)}/j/${trip.code}` },
       ),
     );
   });
@@ -245,6 +283,7 @@ export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: num
           <script id="data" type="application/json">${raw(json)}</script>
           <script>${raw(TRIP_JS)}</script>`,
         `${trip.name}: who owes what, line by line.`,
+        { image: `${origin(c)}/og/${trip.code}.png`, url: `${origin(c)}/t/${trip.code}` },
       ),
     );
   });

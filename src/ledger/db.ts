@@ -285,6 +285,9 @@ export class Store {
       )
       .run(expenseId, userId, cents, status, status === "pending" ? null : now);
   }
+  removeShare(expenseId: number, userId: number) {
+    this.db.prepare("DELETE FROM shares WHERE expense_id = ? AND user_id = ?").run(expenseId, userId);
+  }
   shares(expenseId: number): Share[] {
     return this.db.prepare("SELECT * FROM shares WHERE expense_id = ? ORDER BY user_id").all(expenseId) as Share[];
   }

@@ -7,7 +7,8 @@ WORKDIR /app
 
 # better-sqlite3 falls back to compiling from source when no prebuilt matches the
 # host's Node build (seen on Railway), so keep a minimal toolchain available.
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+# fontconfig + a font let sharp render the text in icons and link-preview cards.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ fontconfig fonts-dejavu-core \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./

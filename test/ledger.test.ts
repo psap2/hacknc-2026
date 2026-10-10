@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { heuristicAssign, heuristicIntent } from "../src/ai/heuristic.js";
+import { heuristicAmount, heuristicAssign, heuristicIntent } from "../src/ai/heuristic.js";
 import { minTransfers } from "../src/ledger/settle.js";
 import { allocate, fmt, parseCents, splitEven, splitItems } from "../src/ledger/split.js";
 
@@ -87,5 +87,19 @@ describe("parsing", () => {
       { item: 2, names: ["Sam"] },
       { item: 3, names: ["Amit", "Jake", "Priya", "Sam"] },
     ]);
+  });
+});
+
+describe("heuristicAmount (keyword fallback when Gemini is unavailable)", () => {
+  it("reads thousands separators and k-shorthand", () => {
+    expect(heuristicAmount("i paid 2,400 for flights")).toBe(240000);
+    expect(heuristicAmount("$2,400.50 for flights")).toBe(240050);
+    expect(heuristicAmount("$2400 for flights split evenly")).toBe(240000);
+    expect(heuristicAmount("flights were 1.2k")).toBe(120000);
+    expect(heuristicAmount("paid 30 for firewood")).toBe(3000);
+  });
+  it("doesn't mistake counts for money", () => {
+    expect(heuristicAmount("split 4 ways")).toBeNull();
+    expect(heuristicAmount("dinner for 3 people")).toBeNull();
   });
 });

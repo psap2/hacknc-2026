@@ -77,8 +77,11 @@ export class Tab {
     const join = cmd.match(/^JOIN\s*([A-Z0-9]{4,10})$/);
     if (join) return this.joinTrip(user, join[1]!);
 
-    const newTrip = text.match(/^(?:new|start|create)\s+(?:a\s+)?trip\s*:?\s*(.+)$/i);
-    if (newTrip) return this.createTrip(user, newTrip[1]!);
+    const newTrip =
+      text.match(/^(?:new|start|create|open|make)\s+(?:a\s+|another\s+)?(?:trip|tab)\s*(?:to|for|:|-)?\s*(.+)$/i) ??
+      text.match(/^(?:new|start|create|open|make)\s+(?:a\s+|another\s+)?(.+?)\s+(?:trip|tab)[.!]*$/i) ??
+      text.match(/^(?:trip|tab)\s*:\s*(.+)$/i);
+    if (newTrip?.[1]?.trim()) return this.createTrip(user, newTrip[1]!);
 
     const rename = text.match(/^(?:call me|my name is|i'?m|im|rename me(?: to)?|name:?)\s+([A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*)?)[.!]*$/i);
     if (rename) {
@@ -119,6 +122,8 @@ export class Tab {
     if (cmd === "HELP") return this.help(user);
     const remind = text.match(/^(?:remind|nudge|poke)\s+(.+?)[.!]*$/i);
     if (remind) return this.remind(user, trip, remind[1]!);
+    const agree = text.match(/^(?:agree|agreed|fine|fair|fair enough|ok(?:ay)? fine|drop (?:it|them|him|her)|take (\w+) off|remove (\w+))[.!]*$/i);
+    if (agree && this.store.disputedExpenseFor(user.id, trip.id)) return this.agreeDispute(user, trip, agree[1] ?? agree[2]);
 
     if (msg.images.length) return this.receiptExpense(user, trip, msg);
 
@@ -191,7 +196,8 @@ export class Tab {
     this.store.addMember(trip.id, user.id, this.now());
     this.store.setActiveTrip(user.id, trip.id);
 
-    await this.say(user, `${name} created! Paste this in your group chat:\n\n"Join our ${base} tab 👉 text ${this.cfg.botName} "JOIN ${trip.code}" or tap ${this.inviteLink(trip)}"`);
+    await this.say(user, `${name} created! Friends can text ${this.cfg.botName} "JOIN ${trip.code}", or forward them this link:`);
+    await this.say(user, this.inviteLink(trip));
     if (!user.name) {
       this.store.setPending(user.id, "awaiting_name", {}, this.now());
       await this.say(user, "And what should I call you?");
@@ -293,7 +299,13 @@ export class Tab {
           return true;
         }
         if (!text) return false;
-        await this.logExpense(user, trip, this.cleanDescription(text) ?? "Expense", p.amountCents, p.split, null, false);
+        // "What was the $2 for?" -> "$2400 for flights, split evenly": take the corrected amount and split.
+        const restated = await this.ai.interpret(text, this.ctx(user, trip, false));
+        const corrected = restated.kind === "expense" && restated.amountCents !== null ? restated : null;
+        const amount = corrected?.amountCents ?? p.amountCents;
+        const split = corrected && corrected.split.mode !== "unspecified" ? corrected.split : p.split;
+        const description = corrected?.description ?? this.cleanDescription(text) ?? "Expense";
+        await this.logExpense(user, trip, description, amount, split, null, false);
         return true;
       }
 
@@ -555,8 +567,53 @@ export class Tab {
     await this.say(
       payer,
       `${this.nameOf(user)} disputed ${target.expense.description} (${fmt(target.cents)})${reason ? `: "${reason}"` : ""}. ` +
-        `Send me a receipt photo, or reply UNDO to remove it.`,
+        `Send me a receipt photo, reply AGREE to take ${this.nameOf(user)} off it, or UNDO to remove the whole thing.`,
     );
+  }
+
+  /** The payer accepts a dispute: the disputer comes off the expense and the rest is re-split. */
+  private async agreeDispute(payer: User, trip: Trip, named?: string) {
+    const expense = this.store.disputedExpenseFor(payer.id, trip.id)!;
+    const shares = this.store.shares(expense.id);
+    const disputed = shares.filter((s) => s.status === "disputed");
+    let who = disputed[0];
+    if (named && !/^(them|him|her|it)$/i.test(named)) {
+      const match = this.resolveNames([named], this.store.members(trip.id), payer);
+      if ("error" in match) return this.say(payer, match.error);
+      who = disputed.find((s) => s.user_id === match.ids[0]) ?? who;
+    }
+    if (!who) return this.say(payer, "Nobody has disputed anything of yours right now.");
+    if (disputed.length > 1 && !named) {
+      return this.say(payer, `${listNames(disputed.map((s) => this.nameOf(this.store.user(s.user_id))))} disputed ${expense.description}. Reply "remove <name>" for whoever's right.`);
+    }
+
+    const remaining = shares.filter((s) => s.user_id !== who!.user_id);
+    if (!remaining.length) return this.say(payer, `That would leave nobody on ${expense.description}. Reply UNDO to remove it instead.`);
+    const even = remaining.every((s) => Math.abs(s.cents - remaining[0]!.cents) <= 1) && Math.abs(who.cents - remaining[0]!.cents) <= 1;
+    const topUp = splitEven(who.cents, remaining.map((s) => s.user_id));
+    const next = new Map(remaining.map((s) => [s.user_id, even ? 0 : s.cents + (topUp.get(s.user_id) ?? 0)]));
+    if (even) for (const [id, c] of splitEven(expense.total_cents, remaining.map((s) => s.user_id))) next.set(id, c);
+
+    const now = this.now();
+    this.store.tx(() => {
+      this.store.removeShare(expense.id, who!.user_id);
+      for (const s of remaining) this.store.setShare(expense.id, s.user_id, next.get(s.user_id)!, "approved", now);
+    });
+    this.store.clearPending(payer.id);
+
+    const dropped = this.store.user(who.user_id);
+    await this.say(payer, `Done. ${this.nameOf(dropped)} is off ${expense.description}; it's now ${this.splitSummary(next, !even)}.`);
+    await this.say(dropped, `${this.nameOf(payer)} agreed: you're off ${expense.description}. Running total: ${this.runningLine(dropped.id, trip.id)}.`);
+    for (const s of remaining) {
+      if (s.user_id === payer.id) continue;
+      const u = this.store.user(s.user_id);
+      await this.say(
+        u,
+        `${this.nameOf(dropped)} came off ${expense.description} ${fmt(expense.total_cents)}, so your share is now ${fmt(next.get(s.user_id)!)}. ` +
+          `Running total: ${this.runningLine(u.id, trip.id)}. ${REPLY_HINT}`,
+      );
+      this.store.setPaymentNudge(trip.id, u.id, now);
+    }
   }
 
   private async undo(user: User, trip: Trip) {
@@ -740,7 +797,9 @@ export class Tab {
   }
 
   private async link(user: User, trip: Trip) {
-    await this.say(user, `${trip.name}\nInvite friends: text ${this.cfg.botName} "JOIN ${trip.code}" or ${this.inviteLink(trip)}\nSee everything: ${this.pageLink(trip)}`);
+    await this.say(user, `${trip.name} · invite code JOIN ${trip.code}. Invite link, then the trip page:`);
+    await this.say(user, this.inviteLink(trip));
+    await this.say(user, this.pageLink(trip));
   }
 
   private async help(user: User) {

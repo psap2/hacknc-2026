@@ -40,9 +40,13 @@ export function heuristicSplit(text: string, ctx: InterpretContext): SplitSpec {
 }
 
 export function heuristicAmount(text: string): number | null {
-  const m = text.match(/\$\s*(\d[\d,]*(?:\.\d{1,2})?)|\b(\d[\d,]*\.\d{2})\b|\b(\d+)\b(?!\s*ways)/);
+  const k = text.match(/\$?\s*(\d+(?:\.\d+)?)\s*k\b/i);
+  if (k) return Math.round(Number(k[1]) * 1000) * 100;
+  const m = text.match(
+    /\$\s*(\d[\d,]*(?:\.\d{1,2})?)|\b(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?)\b|\b(\d[\d,]*\.\d{2})\b|\b(\d+)\b(?!\s*(?:ways|people|of us|items?|nights?|days?|pm|am))/,
+  );
   if (!m) return null;
-  return parseCents(m[1] ?? m[2] ?? m[3]!);
+  return parseCents(m[1] ?? m[2] ?? m[3] ?? m[4]!);
 }
 
 export function heuristicDescription(text: string, memberNames: string[]): string | null {

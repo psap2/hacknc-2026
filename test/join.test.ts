@@ -100,6 +100,56 @@ describe("joining from the web invite", () => {
     expect(m.to(AMIT).at(-1)).toContain("Ayug"); // approvals use the new name
   });
 
+  it("understands several ways of starting a trip", async () => {
+    const m = new GatedMessenger(undefined);
+    const { store, bot } = setup(m);
+    for (const [phone, text] of [
+      ["+15550000011", "new nashville trip"],
+      ["+15550000012", "New Trip Nepal"],
+      ["+15550000013", "start a trip to Asheville"],
+      ["+15550000014", "trip: Beach Week"],
+    ] as const) {
+      await bot.handle({ phone, text, images: [] });
+      expect(m.to(phone)[0]).toMatch(/Trip created!/);
+    }
+    expect(store.allTrips().map((t) => t.name).sort()).toEqual(["Asheville Trip", "Beach Week Trip", "Nashville Trip", "Nepal Trip"]);
+  });
+
+  it("takes a corrected amount when the reply to 'what was it for?' restates it", async () => {
+    const m = new GatedMessenger(undefined);
+    const { store, bot } = setup(m);
+    const trip = await makeTrip(bot, store);
+    await bot.handle({ phone: JAKE, text: `JOIN ${trip.code}`, images: [] });
+    await bot.handle({ phone: JAKE, text: "Jake", images: [] });
+    await bot.handle({ phone: AMIT, text: "pay me 2", images: [] });
+    expect(m.to(AMIT).at(-1)).toContain("What was the $2 for?");
+    await bot.handle({ phone: AMIT, text: "$2400 for flights split evenly", images: [] });
+    expect(m.to(AMIT).at(-1)).toContain("Flights $2,400.00 · split 2 ways ($1,200 each)");
+  });
+
+  it("lets the payer agree with a dispute, taking that person off and re-splitting", async () => {
+    const m = new GatedMessenger(undefined);
+    const { store, bot } = setup(m);
+    const trip = await makeTrip(bot, store);
+    const SAM = "+15550000003";
+    for (const [p, n] of [[JAKE, "Jake"], [SAM, "Sam"]] as const) {
+      await bot.handle({ phone: p, text: `JOIN ${trip.code}`, images: [] });
+      await bot.handle({ phone: p, text: n, images: [] });
+    }
+    await bot.handle({ phone: AMIT, text: "paid $30 for coffee, everyone", images: [] });
+    await bot.handle({ phone: JAKE, text: "DISPUTE I wasn't at coffee", images: [] });
+    expect(m.to(AMIT).at(-1)).toContain("reply AGREE to take Jake off it");
+    await bot.handle({ phone: AMIT, text: "agree", images: [] });
+    expect(m.to(AMIT).at(-1)).toBe("Done. Jake is off Coffee; it's now split 2 ways ($15 each).");
+    expect(m.to(JAKE).at(-1)).toContain("you're off Coffee");
+    expect(m.to(SAM).at(-1)).toContain("your share is now $15.00");
+    const coffee = store.expenses(trip.id)[0]!;
+    expect(store.shares(coffee.id).map((s) => [s.user_id, s.cents])).toEqual([
+      [store.userByPhone(AMIT)!.id, 1500],
+      [store.userByPhone(SAM)!.id, 1500],
+    ]);
+  });
+
   it("accepts JOIN with or without a space before the code", async () => {
     const m = new GatedMessenger(undefined);
     const { store, bot } = setup(m);
