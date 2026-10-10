@@ -15,13 +15,24 @@ export interface SplitSpec {
 
 export type Intent =
   | { kind: "expense"; amountCents: number | null; description: string | null; split: SplitSpec }
-  | { kind: "why" | "balance" | "settle" | "pay" | "help" }
+  /** Start a trip. tripName null = they want one but didn't say what to call it. */
+  | { kind: "new_trip"; tripName: string | null }
+  /** Push back on a charge; reason is their own words. */
+  | { kind: "dispute"; reason: string | null }
+  /** Nudge named people (or "everyone") about what they owe. */
+  | { kind: "remind"; names: string[] }
+  | { kind: "rename"; name: string | null }
+  | { kind: "why" | "balance" | "settle" | "pay" | "help" | "undo" | "link" | "agree" }
   | { kind: "unknown" };
 
 export interface InterpretContext {
   senderName: string;
   memberNames: string[];
   hasImage: boolean;
+  /** Active trip name, or null when the sender isn't in a trip yet. */
+  tripName: string | null;
+  /** Someone disputed one of the sender's charges and it's still open. */
+  openDispute: boolean;
 }
 
 /** item index (0-based) -> names who shared it. */

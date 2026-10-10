@@ -33,7 +33,14 @@ const RECEIPT_SCHEMA = {
 const INTENT_SCHEMA = {
   type: "object",
   properties: {
-    kind: { type: "string", enum: ["expense", "why", "balance", "settle", "pay", "help", "unknown"] },
+    kind: {
+      type: "string",
+      enum: ["expense", "new_trip", "dispute", "remind", "rename", "why", "balance", "settle", "pay", "help", "undo", "link", "agree", "unknown"],
+    },
+    trip_name: { type: ["string", "null"], description: "For new_trip: the destination or name, Title Case, without the word 'trip'. null if not stated." },
+    reason: { type: ["string", "null"], description: "For dispute: the sender's complaint in their own words." },
+    people: { type: "array", items: { type: "string" }, description: "For remind: member names (exact spelling) or 'everyone'." },
+    new_name: { type: ["string", "null"], description: "For rename: what the sender wants to be called." },
     amount_cents: { type: ["integer", "null"] },
     description: {
       type: ["string", "null"],
@@ -47,7 +54,7 @@ const INTENT_SCHEMA = {
     },
     include_sender: { type: "boolean", description: "Is the sender part of the split? Usually true." },
   },
-  required: ["kind", "amount_cents", "description", "split_mode", "split_names", "include_sender"],
+  required: ["kind", "trip_name", "reason", "people", "new_name", "amount_cents", "description", "split_mode", "split_names", "include_sender"],
 };
 
 const ASSIGN_SCHEMA = {
@@ -138,6 +145,10 @@ export class GeminiAI implements AI {
     try {
       const out = await this.json<{
         kind: Intent["kind"];
+        trip_name: string | null;
+        reason: string | null;
+        people: string[];
+        new_name: string | null;
         amount_cents: number | null;
         description: string | null;
         split_mode: "everyone" | "only" | "except" | "by_item" | "unspecified";
@@ -146,15 +157,23 @@ export class GeminiAI implements AI {
       }>(
         [
           {
-            text: `You route text messages for Tab, a trip expense-splitting assistant.
+            text: `You route text messages for Tab, a trip expense-splitting assistant that people talk to over iMessage.
 Sender: ${ctx.senderName}
-Trip members: ${ctx.memberNames.join(", ")}
+${ctx.tripName ? `Current trip: ${ctx.tripName}\nTrip members: ${ctx.memberNames.join(", ")}` : "The sender is NOT in a trip yet."}
+${ctx.openDispute ? "A friend has disputed one of the sender's charges and Tab asked the sender whether to drop it." : ""}
 The sender ${ctx.hasImage ? "ALSO attached a receipt photo (so an expense is very likely, amount may come from the photo)" : "did not attach a photo"}.
 
-Classify the message:
-- expense: the sender paid for something to split, or asks to be paid back ("pay me $30", "gas, everyone", "dinner, me jake and sam").
+People text casually. Read for meaning, not keywords. Classify the message:
+- new_trip: wants to start/plan a trip or tab ("i am going on a new trip to florida", "nashville next weekend, start a tab", "new trip"). trip_name = the place or name.
+- expense: the sender paid for something to split, or asks to be paid back ("pay me $30", "gas, everyone", "dinner, me jake and sam", "2,400 for flights").
+- dispute: pushes back on a charge ("that's wrong", "I wasn't at that dinner", "I didn't order drinks"). reason = their words.
+- agree: ${ctx.openDispute ? "accepts the friend's dispute (\"fine\", \"fair\", \"take her off\")" : "n/a (no open dispute) -> unknown"}.
+- remind: wants Tab to nudge people who owe ("remind jake", "poke everyone"). people = names.
+- rename: wants a different name ("call me PJ").
+- undo: take back the last thing they logged.  - link: wants the invite link or trip page.
 - why: asks why they owe / wants a breakdown.  - balance: asks what they owe or are owed, their total or running total, or where they stand.
-- settle: wants to settle up.  - pay: wants to pay what they owe.  - help: asks how Tab works.  - unknown: anything else.
+- settle: wants to settle up.  - pay: wants to pay what they owe.  - help: asks how Tab works.
+- unknown: chit-chat or anything Tab doesn't do. Never invent an expense from small talk.
 
 For expenses, work out who shares it:
 - "everyone", "all", "split 4 ways" -> everyone
@@ -168,7 +187,20 @@ Message: """${text}"""`,
         ],
         INTENT_SCHEMA,
       );
-      if (out.kind !== "expense") return { kind: out.kind } as Intent;
+      switch (out.kind) {
+        case "new_trip":
+          return { kind: "new_trip", tripName: out.trip_name?.trim() || null };
+        case "dispute":
+          return { kind: "dispute", reason: out.reason?.trim() || text };
+        case "remind":
+          return { kind: "remind", names: out.people ?? [] };
+        case "rename":
+          return { kind: "rename", name: out.new_name?.trim() || null };
+        case "expense":
+          break;
+        default:
+          return { kind: out.kind } as Intent;
+      }
       return {
         kind: "expense",
         amountCents: out.amount_cents,

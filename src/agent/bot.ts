@@ -1,4 +1,5 @@
 import type { AI, InterpretContext, SplitSpec } from "../ai/types.js";
+import { heuristicTripName } from "../ai/heuristic.js";
 import type { Expense, Store, Trip, User } from "../ledger/db.js";
 import { breakdownFor, pairwise, tripLedger } from "../ledger/settle.js";
 import { type Receipt, receiptLooksConsistent, splitEven, splitItems } from "../ledger/split.js";
@@ -26,6 +27,7 @@ export interface BotDeps {
 /** Conversation state: the one question Tab is waiting on for each person. */
 type PendingState =
   | { kind: "awaiting_name" }
+  | { kind: "awaiting_trip_name" }
   | { kind: "awaiting_reason"; amountCents: number; split: SplitSpec }
   | { kind: "awaiting_amount"; description: string | null; split: SplitSpec; hasPhoto: boolean }
   | { kind: "awaiting_split_mode"; receipt: Receipt; description: string }
@@ -77,11 +79,15 @@ export class Tab {
     const join = cmd.match(/^JOIN\s*([A-Z0-9]{4,10})$/);
     if (join) return this.joinTrip(user, join[1]!);
 
+    // Fast paths for the documented commands; anything looser goes through the model below.
     const newTrip =
-      text.match(/^(?:new|start|create|open|make)\s+(?:a\s+|another\s+)?(?:trip|tab)\s*(?:to|for|:|-)?\s*(.+)$/i) ??
-      text.match(/^(?:new|start|create|open|make)\s+(?:a\s+|another\s+)?(.+?)\s+(?:trip|tab)[.!]*$/i) ??
+      text.match(/^(?:new|start|create|open|make)\s+(?:a\s+|another\s+)?(?:new\s+)?(?:trip|tab)\s*(?:to|for|:|-)?\s*(.*)$/i) ??
+      text.match(/^(?:new|start|create|open|make)\s+(?:a\s+|another\s+)?(?:new\s+)?(.+?)\s+(?:trip|tab)[.!]*$/i) ??
       text.match(/^(?:trip|tab)\s*:\s*(.+)$/i);
-    if (newTrip?.[1]?.trim()) return this.createTrip(user, newTrip[1]!);
+    if (newTrip) {
+      const raw = newTrip[1]!.trim();
+      return this.startTripFromIntent(user, /^(new|another|a|the|our|my)?$/i.test(raw) ? null : raw);
+    }
 
     const rename = text.match(/^(?:call me|my name is|i'?m|im|rename me(?: to)?|name:?)\s+([A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*)?)[.!]*$/i);
     if (rename) {
@@ -98,6 +104,10 @@ export class Tab {
 
     const trip = this.activeTrip(user);
     if (!trip) {
+      // Not in a trip yet: the only useful thing they can mean is "start one", so let the model
+      // read casual phrasings ("i am going on a new trip to florida") before giving up.
+      const intent = text ? await this.ai.interpret(text, this.ctx(user, undefined, false)) : null;
+      if (intent?.kind === "new_trip") return this.startTripFromIntent(user, intent.tripName);
       return this.say(
         user,
         `Hi! I'm ${this.cfg.botName}. I split trip expenses so nobody has to chase anyone. ` +
@@ -141,9 +151,35 @@ export class Tab {
         return this.pay(user, trip);
       case "help":
         return this.help(user);
+      case "new_trip":
+        return this.startTripFromIntent(user, intent.tripName);
+      case "dispute":
+        return this.dispute(user, trip, intent.reason ?? "");
+      case "remind":
+        return this.remind(user, trip, intent.names.join(", "));
+      case "rename": {
+        if (!intent.name) return this.say(user, `What should I call you? e.g. "call me PJ".`);
+        const name = titleCase(intent.name).slice(0, 30);
+        this.store.setUserName(user.id, name);
+        return this.say(user, `Got it, I'll call you ${name} from now on.`);
+      }
+      case "undo":
+        return this.undo(user, trip);
+      case "link":
+        return this.link(user, trip);
+      case "agree":
+        if (this.store.disputedExpenseFor(user.id, trip.id)) return this.agreeDispute(user, trip);
+        return this.say(user, `Nothing's waiting on you right now. Text TOTAL to see where you stand.`);
       default:
         return this.say(user, `Not sure what you mean. Text me a receipt or something like "paid $40 for snacks". Text HELP for more.`);
     }
+  }
+
+  /** "new trip" with no name: ask for one instead of creating "Our Trip". */
+  private async startTripFromIntent(user: User, tripName: string | null) {
+    if (tripName?.trim()) return this.createTrip(user, tripName);
+    this.store.setPending(user.id, "awaiting_trip_name", {}, this.now());
+    return this.say(user, `Nice! What should I call the trip? (e.g. "Florida" or "Beach Week")`);
   }
 
   /**
@@ -265,6 +301,19 @@ export class Tab {
     const trip = this.activeTrip(user);
 
     switch (p.kind) {
+      case "awaiting_trip_name": {
+        if (!text || msg.images.length) return false;
+        this.store.clearPending(user.id);
+        if (/^(no|nah|nevermind|never mind|cancel|stop)\b/i.test(text)) {
+          await this.say(user, `No problem. Text "new trip <name>" whenever you're ready.`);
+          return true;
+        }
+        const name = heuristicTripName(text) ?? text.replace(/^(?:call it|name it|it'?s|let'?s say|how about)\s+/i, "");
+        if (!name) return false;
+        await this.createTrip(user, name);
+        return true;
+      }
+
       case "awaiting_name": {
         if (!text) return false;
         if (/^(hi+|hey+|hello+|yo+|sup|hola|howdy|ok(ay)?|yes|yeah|yep|hi there|hey there|what'?s up|test(ing)?)[\s!.?]*$/i.test(text)) {
@@ -861,11 +910,13 @@ export class Tab {
     return latest;
   }
 
-  private ctx(user: User, trip: Trip, hasImage: boolean): InterpretContext {
+  private ctx(user: User, trip: Trip | undefined, hasImage: boolean): InterpretContext {
     return {
       senderName: this.nameOf(user),
-      memberNames: this.store.members(trip.id).map((m) => this.nameOf(m)),
+      memberNames: trip ? this.store.members(trip.id).map((m) => this.nameOf(m)) : [],
       hasImage,
+      tripName: trip?.name ?? null,
+      openDispute: trip ? Boolean(this.store.disputedExpenseFor(user.id, trip.id)) : false,
     };
   }
 

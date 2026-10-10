@@ -108,11 +108,31 @@ describe("joining from the web invite", () => {
       ["+15550000012", "New Trip Nepal"],
       ["+15550000013", "start a trip to Asheville"],
       ["+15550000014", "trip: Beach Week"],
+      ["+15550000015", "i am going on a new trip to florida"],
     ] as const) {
       await bot.handle({ phone, text, images: [] });
       expect(m.to(phone)[0]).toMatch(/Trip created!/);
     }
-    expect(store.allTrips().map((t) => t.name).sort()).toEqual(["Asheville Trip", "Beach Week Trip", "Nashville Trip", "Nepal Trip"]);
+    expect(store.allTrips().map((t) => t.name).sort()).toEqual(["Asheville Trip", "Beach Week Trip", "Florida Trip", "Nashville Trip", "Nepal Trip"]);
+  });
+
+  it("asks for a name when someone says 'new trip' without one", async () => {
+    const m = new GatedMessenger(undefined);
+    const { store, bot } = setup(m);
+    await bot.handle({ phone: "+15550000016", text: "start a new trip", images: [] });
+    expect(m.to("+15550000016").at(-1)).toContain("What should I call the trip?");
+    await bot.handle({ phone: "+15550000016", text: "Big Sur", images: [] });
+    expect(m.to("+15550000016").at(-3)).toMatch(/Big Sur Trip created!/);
+    expect(store.allTrips().map((t) => t.name)).toEqual(["Big Sur Trip"]);
+  });
+
+  it("switches trips from inside a trip with casual wording", async () => {
+    const m = new GatedMessenger(undefined);
+    const { store, bot } = setup(m);
+    await makeTrip(bot, store);
+    await bot.handle({ phone: AMIT, text: "ok we're going on a trip to Florida in march", images: [] });
+    expect(m.to(AMIT).at(-2)).toMatch(/Florida Trip created!/);
+    expect(store.allTrips().map((t) => t.name).sort()).toEqual(["Asheville Trip", "Florida Trip"]);
   });
 
   it("takes a corrected amount when the reply to 'what was it for?' restates it", async () => {

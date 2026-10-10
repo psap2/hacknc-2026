@@ -61,11 +61,37 @@ export function heuristicDescription(text: string, memberNames: string[]): strin
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** "going on a trip to Florida", "planning a Nashville trip next month", "trip to nepal" -> trip name. */
+export function heuristicTripName(text: string): string | null | undefined {
+  const t = text.trim();
+  if (!/\b(trip|tab|vacation|getaway)\b/i.test(t)) return undefined;
+  const stop = "(?:\\s+(?:next|this|in|on|with|and|for|from|,).*)?[.!?\\s]*$";
+  const m =
+    t.match(new RegExp(`\\b(?:trip|tab|vacation|getaway)\\s+(?:to|for|in)\\s+([A-Za-z][\\w' -]{1,30}?)${stop}`, "i")) ??
+    t.match(/\b(?:new|another|next|a|our|the|my)\s+(?:new\s+)?([A-Za-z][\w' -]{1,30}?)\s+(?:trip|tab|vacation|getaway)\b/i);
+  const name = m?.[1]?.trim();
+  if (name && !/^(new|another|next|a|our|the|my|this|that)$/i.test(name)) return name;
+  if (/\b(new|another|next|planning|going|start|create|open|make)\b/i.test(t)) return null;
+  return undefined;
+}
+
 export function heuristicIntent(text: string, ctx: InterpretContext): Intent {
   const t = text.trim();
   if (/\bwhy\b|how much do i owe|breakdown/i.test(t)) return { kind: "why" };
   if (/^(balance|balances|total|totals|what do i owe|status)\b|\b(my|running) total\b|where do i stand/i.test(t)) return { kind: "balance" };
+  if (/^(undo|take that back|delete that|remove that|scratch that|cancel that)\b/i.test(t)) return { kind: "undo" };
+  if (/\b(invite|trip) (link|page)\b|send (me )?the link\b/i.test(t)) return { kind: "link" };
+  const remind = t.match(/\b(?:remind|nudge|poke|bug)\s+(.+?)[.!?]*$/i);
+  if (remind) return { kind: "remind", names: remind[1]!.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean) };
+  if (/\b(dispute|that'?s (wrong|not right)|not mine|wasn'?t (me|there))\b/i.test(t)) return { kind: "dispute", reason: t };
+  if (ctx.openDispute && /^(agree|agreed|fine|fair( enough)?|ok(ay)?|sure|yeah|yes|you'?re right)\b/i.test(t)) return { kind: "agree" };
   const amountCents = heuristicAmount(t);
+  if (amountCents === null && !ctx.hasImage) {
+    const tripName = heuristicTripName(t);
+    if (tripName !== undefined) return { kind: "new_trip", tripName };
+    // "I didn't go to that dinner" with no amount and no photo is a complaint, not a new expense.
+    if (/\bi (didn'?t|did not|never|wasn'?t)\b/i.test(t)) return { kind: "dispute", reason: t };
+  }
   if (amountCents !== null || ctx.hasImage) {
     return {
       kind: "expense",

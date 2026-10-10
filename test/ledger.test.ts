@@ -57,8 +57,27 @@ describe("minTransfers", () => {
   });
 });
 
+describe("casual phrasing without the model", () => {
+  const ctx = { senderName: "Priya", memberNames: ["Amit", "Jake", "Priya", "Sam"], hasImage: false, tripName: "Nepal Trip", openDispute: false };
+  it("hears a new trip in a sentence", () => {
+    expect(heuristicIntent("i am going on a new trip to florida", ctx)).toEqual({ kind: "new_trip", tripName: "florida" });
+    expect(heuristicIntent("planning a Nashville trip next month!", ctx)).toEqual({ kind: "new_trip", tripName: "Nashville" });
+    expect(heuristicIntent("new trip", ctx)).toEqual({ kind: "new_trip", tripName: null });
+    expect(heuristicIntent("paid $40 for the trip to the store", ctx).kind).toBe("expense");
+  });
+  it("hears disputes, undo, link and remind", () => {
+    expect(heuristicIntent("that's wrong, I wasn't at dinner", ctx).kind).toBe("dispute");
+    expect(heuristicIntent("I didn't go to that dinner", ctx).kind).toBe("dispute");
+    expect(heuristicIntent("undo that", ctx).kind).toBe("undo");
+    expect(heuristicIntent("send me the link", ctx).kind).toBe("link");
+    expect(heuristicIntent("nudge Jake and Sam", ctx)).toEqual({ kind: "remind", names: ["Jake", "Sam"] });
+    expect(heuristicIntent("fine", ctx).kind).toBe("unknown");
+    expect(heuristicIntent("fine", { ...ctx, openDispute: true }).kind).toBe("agree");
+  });
+});
+
 describe("parsing", () => {
-  const ctx = { senderName: "Priya", memberNames: ["Amit", "Jake", "Priya", "Sam"], hasImage: false };
+  const ctx = { senderName: "Priya", memberNames: ["Amit", "Jake", "Priya", "Sam"], hasImage: false, tripName: "Nepal Trip", openDispute: false };
   it("parses money", () => {
     expect(parseCents("$40")).toBe(4000);
     expect(parseCents("1,234.5")).toBe(123450);
@@ -99,7 +118,7 @@ describe("heuristicAmount (keyword fallback when Gemini is unavailable)", () => 
     expect(heuristicAmount("paid 30 for firewood")).toBe(3000);
   });
   it("keeps the description when the amount has a comma", () => {
-    const ctx = { senderName: "Amit", memberNames: ["Amit", "Jake"], hasImage: false };
+    const ctx = { senderName: "Amit", memberNames: ["Amit", "Jake"], hasImage: false, tripName: "Nepal Trip", openDispute: false };
     const i = heuristicIntent("i paid 2,400 for flights", ctx);
     expect(i).toMatchObject({ kind: "expense", amountCents: 240000, description: "Flights" });
     expect(heuristicIntent("paid $2,400 for flights, everyone", ctx)).toMatchObject({ description: "Flights", split: { mode: "everyone" } });
