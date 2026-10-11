@@ -49,6 +49,16 @@ Design and trade-offs: [`docs/adr/0001-velo-architecture.md`](docs/adr/0001-velo
 
 > ⚠️ **Demo only.** Tab holds an encrypted devnet wallet for each person so paying takes one tap. A production version would use embedded/MPC wallets and real USDC.
 
+## How we used AI to build it
+
+Gemini is what runs inside Tab. Building Tab was a separate job, and for that we used **Claude Code** as a pair programmer for most of the hackathon:
+
+- **Main agent:** Claude Code worked in the repo with us. It wrote and refactored the TypeScript, ran `npm test` after changes, and fixed whatever broke. Most of the commit history came out of those sessions.
+- **Subagents in parallel:** for bigger pieces we had Claude Code start several subagents at once. Some searched the codebase, some planned a feature (multi-trip routing, disputes, settling), and some reviewed a diff for bugs while the main session kept going. That way the main session didn't get filled up with search results.
+- **Reviews and docs:** we ran code-review passes before merging the money logic, and Claude helped draft the ADR and this README.
+
+We made the product decisions and checked the money math ourselves. The end-to-end Asheville test is how we confirmed that changes Claude made didn't break splits or settlements.
+
 ## Run it
 
 ```bash
