@@ -4,11 +4,9 @@
 
 Tab is an AI agent with a real phone number. Friends on a trip text it receipts and expenses in plain English. Tab splits them, keeps everyone's running total, explains any number on request, and settles up in USDC on **Solana** when someone says "pay". There is no app to install, no account to make, no spreadsheet, and no crypto in sight.
 
-**HackNC 2026** · Team: Prasun Sapkota, Amit Khanal, Ayug (add surnames) · [Devpost](https://hacknc-2026.devpost.com/) · 🎥 **Demo video: ADD LINK** · Live: https://tab-production-2bdf.up.railway.app
+**HackNC 2026** · Team: Prasun Sapkota, Amit Khanal, Ayug (add surnames) · [Devpost](https://hacknc-2026.devpost.com/) · 🎥 **[Demo video](https://vimeo.com/1234803827)** · Live: https://tab-production-2bdf.up.railway.app
 
 Submitted to: **General track** · **Best iMessage Agent with Photon** · **MLH Best Use of Gemini API** · **MLH Best Use of Solana**
-
-🎥 **[Watch the demo video](https://vimeo.com/1234803827)**
 
 ## How it feels
 
