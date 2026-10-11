@@ -58,7 +58,7 @@ describe("minTransfers", () => {
 });
 
 describe("casual phrasing without the model", () => {
-  const ctx = { senderName: "Priya", memberNames: ["Amit", "Jake", "Priya", "Sam"], hasImage: false, tripName: "Nepal Trip", openTripNames: ["Nepal Trip"], openDispute: false };
+  const ctx = { senderName: "Priya", memberNames: ["Amit", "Jake", "Priya", "Sam"], hasImage: false, tripName: "Nepal Trip", openTripNames: ["Nepal Trip"], openDispute: false, ownDispute: false };
   it("hears a new trip in a sentence", () => {
     expect(heuristicIntent("i am going on a new trip to florida", ctx)).toEqual({ kind: "new_trip", tripName: "florida" });
     expect(heuristicIntent("planning a Nashville trip next month!", ctx)).toEqual({ kind: "new_trip", tripName: "Nashville" });
@@ -77,7 +77,7 @@ describe("casual phrasing without the model", () => {
 });
 
 describe("parsing", () => {
-  const ctx = { senderName: "Priya", memberNames: ["Amit", "Jake", "Priya", "Sam"], hasImage: false, tripName: "Nepal Trip", openTripNames: ["Nepal Trip"], openDispute: false };
+  const ctx = { senderName: "Priya", memberNames: ["Amit", "Jake", "Priya", "Sam"], hasImage: false, tripName: "Nepal Trip", openTripNames: ["Nepal Trip"], openDispute: false, ownDispute: false };
   it("parses money", () => {
     expect(parseCents("$40")).toBe(4000);
     expect(parseCents("1,234.5")).toBe(123450);
@@ -118,7 +118,7 @@ describe("heuristicAmount (keyword fallback when Gemini is unavailable)", () => 
     expect(heuristicAmount("paid 30 for firewood")).toBe(3000);
   });
   it("keeps the description when the amount has a comma", () => {
-    const ctx = { senderName: "Amit", memberNames: ["Amit", "Jake"], hasImage: false, tripName: "Nepal Trip", openTripNames: ["Nepal Trip"], openDispute: false };
+    const ctx = { senderName: "Amit", memberNames: ["Amit", "Jake"], hasImage: false, tripName: "Nepal Trip", openTripNames: ["Nepal Trip"], openDispute: false, ownDispute: false };
     const i = heuristicIntent("i paid 2,400 for flights", ctx);
     expect(i).toMatchObject({ kind: "expense", amountCents: 240000, description: "Flights" });
     expect(heuristicIntent("paid $2,400 for flights, everyone", ctx)).toMatchObject({ description: "Flights", split: { mode: "everyone" } });

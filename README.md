@@ -89,6 +89,6 @@ The trip page is at `http://localhost:3000/t/<CODE>`.
 
 `new trip <name>` · `JOIN <code>` · receipt photos · "paid $X for Y" · `TOTAL` (or "what's my total") · `WHY` · `DISPUTE <reason>` · `YES` (takes a dispute back) · `remind <name|everyone>` · `SETTLE` · `PAY` · `UNDO` · `LINK` · `TRIPS` · `close <trip>` · `call me <name>` · `HELP`
 
-Casual phrasing works too: the model classifies every message into one of those actions and never free-writes a reply.
+Those are just the short forms. Every message goes through the model, so casual phrasing works ("i am going on a new trip to florida", "that dinner charge is wrong, I wasn't there", "we're done with cali, everyone venmo'd me"). When Tab needs a decision it asks a plain question ("Should I take Jake off it, or do you have a receipt?") and reads the answer the same way; there are no magic words to reply with. The model only ever picks an action and its details; it never does money math or writes free text to anyone.
 
 **Several trips at once.** You can be in any number of open trips. With one, nothing changes. With more, name the trip inline ("$80 gas, florida", "total nyc", "pay florida") and Tab routes it without asking; an expense that doesn't say gets one question ("Which trip is that for? 1) Florida 2) Nyc"), answered by name, number, or YES for the one you used last. Bare `TOTAL` shows every open trip on one line each. Disputes, AGREE and UNDO follow the expense, so they never ask. `close florida` ends a trip once it's settled (or "close florida anyway"), after which it stops counting as open.

@@ -38,6 +38,15 @@ export interface InterpretContext {
   openTripNames: string[];
   /** Someone disputed one of the sender's charges and it's still open. */
   openDispute: boolean;
+  /** The sender disputed someone else's charge and it's still open (so "fine, count it" withdraws it). */
+  ownDispute: boolean;
+}
+
+/** One possible meaning of a reply to a question Tab asked. `hints` is only for the no-model fallback. */
+export interface Choice {
+  key: string;
+  means: string;
+  hints?: RegExp;
 }
 
 /** item index (0-based) -> names who shared it. */
@@ -52,4 +61,9 @@ export interface AI {
     items: { name: string; price_cents: number }[],
     ctx: InterpretContext,
   ): Promise<ItemAssignment | null>;
+  /**
+   * Tab asked a question; which option does the reply mean? null = the message isn't an answer
+   * (a new expense, something unrelated), so it should be handled as a fresh message.
+   */
+  choose(text: string, question: string, options: Choice[], ctx: InterpretContext): Promise<string | null>;
 }

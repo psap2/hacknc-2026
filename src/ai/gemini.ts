@@ -1,8 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 import sharp from "sharp";
 import type { Receipt } from "../ledger/split.js";
-import { heuristicAssign, heuristicIntent } from "./heuristic.js";
-import type { AI, Intent, InterpretContext, ItemAssignment } from "./types.js";
+import { heuristicAssign, heuristicChoose, heuristicIntent } from "./heuristic.js";
+import type { AI, Choice, Intent, InterpretContext, ItemAssignment } from "./types.js";
 
 const RECEIPT_SCHEMA = {
   type: "object",
@@ -168,6 +168,7 @@ Sender: ${ctx.senderName}
 ${ctx.tripName ? `Current trip: ${ctx.tripName}\nTrip members: ${ctx.memberNames.join(", ")}` : "The sender is NOT in a trip yet."}
 ${ctx.openTripNames.length > 1 ? `All of the sender's open trips: ${ctx.openTripNames.join(", ")}` : ""}
 ${ctx.openDispute ? "A friend has disputed one of the sender's charges and Tab asked the sender whether to drop it." : ""}
+${ctx.ownDispute ? "The sender disputed a friend's charge earlier; it's still open." : ""}
 The sender ${ctx.hasImage ? "ALSO attached a receipt photo (so an expense is very likely, amount may come from the photo)" : "did not attach a photo"}.
 
 People text casually. Read for meaning, not keywords. Classify the message:
@@ -175,7 +176,7 @@ People text casually. Read for meaning, not keywords. Classify the message:
 - close_trip: the trip is over / wants to close, end or archive it ("we're done with florida", "close the nyc tab", "end all active trips"). trip_name = which one (match the open-trip list), all_trips if they mean every trip, settled_outside if they say the money was already handled off Tab ("we sorted it out", "paid me in person"), confirmed if they insist on closing regardless.
 - expense: the sender paid for something to split, or asks to be paid back ("pay me $30", "gas, everyone", "dinner, me jake and sam", "2,400 for flights").
 - dispute: pushes back on a charge ("that's wrong", "I wasn't at that dinner", "I didn't order drinks"). reason = their words.
-- agree: ${ctx.openDispute ? "accepts the friend's dispute (\"fine\", \"fair\", \"take her off\")" : "n/a (no open dispute) -> unknown"}.
+- agree: ${ctx.openDispute ? "accepts the friend's dispute (\"fine\", \"fair\", \"take her off\")" : ctx.ownDispute ? "withdraws their own dispute, is fine counting it after all (\"ok count it\", \"nevermind, I'll pay it\")" : "n/a (no open dispute) -> unknown"}.
 - remind: wants Tab to nudge people who owe ("remind jake", "poke everyone"). people = names.
 - rename: wants a different name ("call me PJ").
 - undo: take back the last thing they logged.  - link: wants the invite link or trip page.
@@ -220,6 +221,30 @@ Message: """${text}"""`,
     } catch (err) {
       console.warn("[gemini] interpret failed, using heuristics:", (err as Error).message);
       return heuristicIntent(text, ctx);
+    }
+  }
+
+  async choose(text: string, question: string, options: Choice[], ctx: InterpretContext): Promise<string | null> {
+    const keys = [...options.map((o) => o.key), "none"];
+    try {
+      const out = await this.json<{ choice: string }>(
+        [
+          {
+            text: `Tab, a trip expense assistant, asked ${ctx.senderName} over text: "${question}"
+What could the reply mean?
+${options.map((o) => `- ${o.key}: ${o.means}`).join("\n")}
+- none: the reply isn't an answer to that question (a new expense, a different request, small talk).
+People answer casually ("yeah we're good", "nah leave it", "he definitely ate it"); read for meaning.
+
+Reply: """${text}"""`,
+          },
+        ],
+        { type: "object", properties: { choice: { type: "string", enum: keys } }, required: ["choice"] },
+      );
+      return out.choice === "none" ? null : out.choice;
+    } catch (err) {
+      console.warn("[gemini] choose failed, using heuristics:", (err as Error).message);
+      return heuristicChoose(text, options);
     }
   }
 

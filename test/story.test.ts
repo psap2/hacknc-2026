@@ -117,10 +117,10 @@ describe("the Asheville trip", () => {
     await say(AMIT, "gas, everyone", [PHOTO]);
     expect(m.last(AMIT)).toBe("Logged to Asheville Trip: Gas $80.00 · split 4 ways ($20 each). I've told Jake, Priya, and Sam.");
     expect(m.last(JAKE)).toBe(
-      "Amit logged Gas $80.00 · your share $20.00. Reply DISPUTE + reason if that's wrong.",
+      "Amit logged Gas $80.00 · your share $20.00.",
     );
     await say(JAKE, "YES");
-    expect(m.last(JAKE)).toContain("No need to approve anything");
+    expect(m.last(JAKE)).toContain("Nothing needs approving here");
 
     // Priya: dinner without Amit. Jake's running total now spans two people.
     m.clear();
@@ -137,14 +137,14 @@ describe("the Asheville trip", () => {
     await say(SAM, "firewood");
     expect(m.last(SAM)).toBe("Logged to Asheville Trip: Firewood $30.00 · split 4 ways ($7.50 each). I've told Amit, Jake, and Priya.");
     // Per-expense texts stay short; TOTAL nets what Sam owes Amit against what Amit now owes Sam.
-    expect(m.last(AMIT)).toBe("Sam logged Firewood $30.00 · your share $7.50. Reply DISPUTE + reason if that's wrong.");
+    expect(m.last(AMIT)).toBe("Sam logged Firewood $30.00 · your share $7.50.");
     await say(AMIT, "TOTAL");
     expect(m.last(AMIT)).toContain("running total: Jake owes you $20.00, Priya owes you $20.00, and Sam owes you $12.50.");
 
     // Amit disputes the firewood (by name, so it doesn't matter that it isn't his latest).
     await say(AMIT, "DISPUTE I don't remember any firewood");
     expect(m.last(AMIT)).toBe(
-      "Disputed Firewood. Your $7.50 won't count until Sam adds a receipt or takes you off it. (Reply YES if you change your mind.)",
+      "Got it. I've taken Firewood ($7.50) off your total until Sam adds a receipt or agrees. If you change your mind, just say so.",
     );
     expect(m.last(SAM)).toContain(`Amit disputed Firewood ($7.50): "I don't remember any firewood"`);
 
@@ -166,7 +166,7 @@ describe("the Asheville trip", () => {
     expect(why).toContain("• $7.50 to Sam: Firewood ($30 ÷ 4), receipt added Oct 12, counted");
     await say(JAKE, "what's my total");
     expect(m.last(JAKE)).toContain("Asheville Trip running total: you owe Amit $20.00, Priya $32.00, and Sam $7.50.");
-    expect(m.last(JAKE)).toContain("Net: you owe $59.50.");
+    expect(m.last(JAKE)).toContain("Overall you owe $59.50.");
     expect(m.last(JAKE)).toContain("https://tab.test/t/");
 
     // Priya settles: fewest payments, everything counted. Jake's $59.50 is routed as
@@ -174,7 +174,7 @@ describe("the Asheville trip", () => {
     m.clear();
     await say(PRIYA, "SETTLE");
     expect(m.last(JAKE)).toContain("You owe Amit $52.50 and Priya $7.00 for Asheville Trip.");
-    expect(m.last(JAKE)).toContain("Reply PAY to send USDC");
+    expect(m.last(JAKE)).toContain("Say pay and I'll send it from your Tab wallet");
 
     // Jake pays
     await say(JAKE, "PAY");
@@ -192,7 +192,7 @@ describe("the Asheville trip", () => {
     now += 25 * 3600_000;
     await bot.runJobs();
     expect(m.all(SAM)).toHaveLength(1);
-    expect(m.last(SAM)).toMatch(/^Daily total for Asheville Trip: you owe .*Net: you owe \$29\.50\. Reply PAY/);
+    expect(m.last(SAM)).toMatch(/^Daily total for Asheville Trip: you owe .*Overall you owe \$29\.50\. Say pay/);
     expect(m.all(JAKE)).toHaveLength(0); // paid up
     expect(m.all(AMIT)).toHaveLength(0); // owed, not owing
     await bot.runJobs();
@@ -218,7 +218,7 @@ describe("the Asheville trip", () => {
     expect(plan).toEqual([{ from: store.userByPhone(JAKE)!.id, to: store.userByPhone(PRIYA)!.id, cents: 500 }]);
     await say(PRIYA, "TOTAL");
     expect(m.last(PRIYA)).toContain("running total: Jake owes you $5.00.");
-    expect(m.last(PRIYA)).toContain("Net: you're owed $5.00.");
+    expect(m.last(PRIYA)).toContain("Overall you're owed $5.00.");
   });
 
   it("a dispute stops the share counting until it's resolved, and YES takes it back", async () => {
@@ -253,6 +253,6 @@ describe("the Asheville trip", () => {
 
   it("tells strangers how to start", async () => {
     await say("+15559999999", "hi");
-    expect(m.last("+15559999999")).toContain('Text "new trip <name>"');
+    expect(m.last("+15559999999")).toContain('Tell me about a trip to start one');
   });
 });

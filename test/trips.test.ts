@@ -69,11 +69,11 @@ describe("being in several trips at once", () => {
 
   it("asks which trip when an expense doesn't say, and logs it where they pick", async () => {
     await say(AMIT, "paid $80 for gas");
-    expect(m.last(AMIT)).toContain("Which trip is that for? 1) Florida  2) Nyc");
+    expect(m.last(AMIT)).toBe("Which trip is that for, Florida or Nyc?");
     expect(store.expenses(1)).toHaveLength(0);
     await say(AMIT, "florida");
     expect(m.to(AMIT).at(-1)).toBe("Logged to Florida Trip: Gas $80.00 · split 2 ways ($40 each). I've told Jake.");
-    expect(m.last(JAKE)).toBe("Amit logged Gas $80.00 on Florida Trip · your share $40.00. Reply DISPUTE + reason if that's wrong.");
+    expect(m.last(JAKE)).toBe("Amit logged Gas $80.00 on Florida Trip · your share $40.00.");
     // Sam isn't on Florida, so he hears nothing.
     expect(m.to(SAM)).toHaveLength(0);
   });
@@ -83,8 +83,8 @@ describe("being in several trips at once", () => {
     await say(AMIT, "2");
     expect(m.to(AMIT).at(-1)).toMatch(/^Logged to Nyc Trip: Gas \$80\.00 · split 3 ways/);
     await say(AMIT, "paid $12 for coffee");
-    expect(m.last(AMIT)).toContain("YES for Nyc"); // last used is the suggestion
-    await say(AMIT, "yes");
+    expect(m.last(AMIT)).toBe("Which trip is that for, Florida or Nyc?");
+    await say(AMIT, "yes"); // a bare yes means the one they used last
     expect(m.to(AMIT).at(-1)).toMatch(/^Logged to Nyc Trip: Coffee \$12\.00/);
   });
 
@@ -103,8 +103,7 @@ describe("being in several trips at once", () => {
     await say(JAKE, "$60 rental car, florida");
     await say(AMIT, "TOTAL");
     expect(m.last(AMIT)).toBe(
-      "Florida Trip: you owe Jake $30.00\nNyc Trip: Jake owes you $10.00 and Sam owes you $10.00\n" +
-        "Reply TOTAL + trip name for the full picture, or PAY + trip name to settle one.",
+      "Florida Trip: you owe Jake $30.00\nNyc Trip: Jake owes you $10.00 and Sam owes you $10.00",
     );
     await say(AMIT, "total florida");
     expect(m.last(AMIT)).toContain("Florida Trip running total: you owe Jake $30.00.");
@@ -121,7 +120,7 @@ describe("being in several trips at once", () => {
     tick();
     await say(AMIT, "$80 gas, florida");
     await say(JAKE, "dispute snacks, I brought my own");
-    expect(m.last(JAKE)).toContain("Disputed Snacks on Nyc Trip.");
+    expect(m.last(JAKE)).toContain("I've taken Snacks ($10.00) on Nyc Trip off your total");
     expect(m.last(AMIT)).toContain("Jake disputed Snacks on Nyc Trip ($10.00)");
     await say(AMIT, "agree");
     expect(m.last(JAKE)).toBe("Amit agreed: you're off Snacks on Nyc Trip.");
@@ -135,8 +134,12 @@ describe("being in several trips at once", () => {
   it("closes a trip only once it's settled (or when told anyway), then stops asking", async () => {
     await say(JAKE, "$60 rental car, florida");
     await say(AMIT, "close florida");
-    expect(m.last(AMIT)).toBe('Florida Trip isn\'t settled yet: Amit owes Jake $30.00.\nReply SETTLE to sort it out, "we settled it ourselves" if the money already changed hands, or "close florida anyway" to close it as is.');
-    await say(AMIT, "close florida anyways");
+    expect(m.last(AMIT)).toBe("Florida Trip isn't settled yet: Amit owes Jake $30.00.\nDid you all settle that outside Tab, or should I keep it open until it's paid?");
+    await say(AMIT, "nah not yet");
+    expect(m.last(AMIT)).toBe("Okay, I'll leave Florida Trip open.");
+    expect(store.trip(1).closed_at).toBeNull();
+    await say(AMIT, "close florida");
+    await say(AMIT, "just close it, he still owes me");
     expect(m.last(AMIT)).toContain("Closed Florida Trip.");
     expect(m.last(AMIT)).toContain("You're still in Nyc Trip.");
     expect(m.last(JAKE)).toContain("Amit closed Florida Trip (with balances still open).");
@@ -163,14 +166,44 @@ describe("being in several trips at once", () => {
     await say(AMIT, "end all active trips");
     expect(m.last(AMIT)).toBe(
       "Closed Nyc Trip.\nFlorida Trip isn't settled yet: Amit owes Jake $30.00.\n" +
-        'Reply SETTLE to sort it out, "we settled it ourselves" if the money already changed hands, or "close all anyway" to close it as is.\nYou\'re still in Florida Trip.',
+        "Did you all settle that outside Tab, or should I keep it open until it's paid?\nYou're still in Florida Trip.",
     );
     expect(m.last(SAM)).toContain("Amit closed Nyc Trip.");
-    await say(AMIT, "close all anyway");
+    await say(AMIT, "leave it as is, just close it");
     expect(m.last(AMIT)).toContain("Closed Florida Trip.");
     expect(store.openTripsFor(store.userByPhone(AMIT)!.id)).toHaveLength(0);
     await say(AMIT, "paid $5 for gum");
     expect(m.last(AMIT)).toContain("All your trips are closed.");
+  });
+
+  it("PAY pays what you owe on every open trip, even if you last used a different one", async () => {
+    await say(JAKE, "$60 rental car, florida");
+    await say(SAM, "$30 pizza, nyc");
+    // Amit's last-used trip is Nyc (he just read about it), but he owes on both.
+    await say(AMIT, "total nyc");
+    await say(AMIT, "PAY");
+    expect(m.to(AMIT).at(-2)).toMatch(/^✅ Sent \$40\.00 USDC: Jake \(Florida Trip\) \$30, Sam \(Nyc Trip\) \$10/);
+    expect(m.last(JAKE)).toContain("Amit paid you $30.00 USDC for Florida Trip.");
+    // Florida is square now (Nyc isn't: Jake still owes Sam), so Tab offers to close it.
+    expect(m.last(AMIT)).toBe("That squares up Florida Trip. Want me to close it?");
+    await say(AMIT, "nah leave it");
+    expect(m.last(AMIT)).toBe("Okay, leaving it as is.");
+    expect(store.trip(1).closed_at).toBeNull();
+    expect(store.transfers(1)).toHaveLength(1);
+    expect(store.transfers(2)).toHaveLength(1);
+    await say(AMIT, "PAY");
+    expect(m.last(AMIT)).toBe("You don't owe anything right now 🎉");
+  });
+
+  it("the payer answers a dispute in plain words", async () => {
+    await say(AMIT, "$30 for snacks, nyc");
+    await say(JAKE, "that snacks charge is wrong, I didn't have any");
+    expect(m.last(AMIT)).toBe('Jake disputed Snacks on Nyc Trip ($10.00): "that snacks charge is wrong, I didn\'t have any". Should I take Jake off it, or do you have a receipt?');
+    await say(AMIT, "no he definitely ate them");
+    expect(m.last(JAKE)).toContain("Amit says you did have Snacks. It stays off your total for now");
+    await say(JAKE, "ok fine count it");
+    expect(m.last(JAKE)).toBe("Counting Snacks $10.00 again.");
+    expect(m.last(AMIT)).toContain("Jake is fine with Snacks after all");
   });
 
   it("a new expense replaces the parked one instead of answering the question", async () => {
@@ -182,7 +215,9 @@ describe("being in several trips at once", () => {
 
   it("daily reminders skip closed trips", async () => {
     await say(JAKE, "$60 rental car, florida");
-    await say(AMIT, "close florida anyway");
+    await say(AMIT, "close florida");
+    await say(AMIT, "yeah we're square, venmo'd");
+    expect(m.last(AMIT)).toContain("Marked as settled outside Tab");
     m.sent = [];
     now += 2 * 24 * 3600_000;
     await bot.runJobs();

@@ -1,4 +1,4 @@
-import type { AI, InterpretContext, SplitSpec } from "../ai/types.js";
+import type { AI, Choice, InterpretContext, SplitSpec } from "../ai/types.js";
 import { heuristicAmount, heuristicTripName } from "../ai/heuristic.js";
 import type { Expense, Store, Trip, User } from "../ledger/db.js";
 import { breakdownFor, pairwise, tripLedger } from "../ledger/settle.js";
@@ -37,10 +37,14 @@ type PendingState =
   | { kind: "awaiting_amount"; description: string | null; split: SplitSpec; hasPhoto: boolean }
   | { kind: "awaiting_split_mode"; receipt: Receipt; description: string }
   | { kind: "awaiting_items"; receipt: Receipt; description: string }
-  | { kind: "awaiting_receipt"; expenseId: number };
+  /** Payer was asked what to do about a friend's dispute (photo = receipt, or drop / keep / undo). */
+  | { kind: "awaiting_dispute_answer"; expenseId: number; disputerId: number }
+  /** Asked to close trips that still have balances: settled outside Tab, close anyway, keep open, or settle. */
+  | { kind: "awaiting_close_decision"; tripIds: number[] }
+  /** A plain yes/no Tab asked ("Want me to close it?"). */
+  | { kind: "awaiting_yes_no"; action: "close_trip" | "undo_expense"; id: number; question: string };
 
 const EVERYONE: SplitSpec = { mode: "everyone", names: [], includeSender: true };
-const REPLY_HINT = "Reply DISPUTE + reason if that's wrong.";
 
 export class Tab {
   private readonly store: Store;
@@ -119,9 +123,9 @@ export class Tab {
       return this.say(
         user,
         closed
-          ? `All your trips are closed. Text "new trip <name>" to start another, or tap an invite link a friend sent you.`
+          ? `All your trips are closed. Tell me about the next one ("new trip Florida") or tap an invite link a friend sent you.`
           : `Hi! I'm ${this.cfg.botName}. I split trip expenses so nobody has to chase anyone. ` +
-              `Text "new trip <name>" to start one, or tap the invite link a friend sent you.`,
+              `Tell me about a trip to start one ("new trip Florida"), or tap the invite link a friend sent you.`,
       );
     }
     if (!user.name) {
@@ -152,9 +156,10 @@ export class Tab {
     if (/^(YES|Y|YEP|YEAH|OK|OKAY|APPROVE|APPROVED|👍)$/.test(cmd)) return this.approve(user, this.tripWithDisputeAgainst(user, open) ?? trip);
     const dispute = text.match(/^dispute\b[\s:,-]*(.*)$/is);
     if (dispute) return this.dispute(user, named ? [trip] : open, dispute[1]!.trim());
-    if (cmd === "WHY") return this.why(user, trip);
-    if (/^(SETTLE|SETTLE UP)$/.test(cmd)) return this.settle(user, trip);
-    if (cmd === "PAY") return this.pay(user, trip);
+    const scope = named ? [trip] : open;
+    if (cmd === "WHY") return this.why(user, scope);
+    if (/^(SETTLE|SETTLE UP)$/.test(cmd)) return this.settle(user, scope, msg);
+    if (cmd === "PAY") return this.pay(user, scope);
     if (/^(BALANCE|BALANCES|TOTAL|TOTALS|MY TOTAL|RUNNING TOTAL|STATUS)$/.test(cmd)) {
       return needsPick ? this.balanceAll(user, open) : this.balance(user, trip);
     }
@@ -182,13 +187,13 @@ export class Tab {
         if (needsPick) return this.askTripPick(user, open, trip, { ...msg, text }, false);
         return this.textExpense(user, trip, intent.amountCents, intent.description, intent.split);
       case "why":
-        return this.why(user, trip);
+        return this.why(user, scope);
       case "balance":
         return needsPick ? this.balanceAll(user, open) : this.balance(user, trip);
       case "settle":
-        return this.settle(user, trip);
+        return this.settle(user, scope, msg);
       case "pay":
-        return this.pay(user, trip);
+        return this.pay(user, scope);
       case "help":
         return this.help(user);
       case "new_trip":
@@ -216,10 +221,12 @@ export class Tab {
       case "agree": {
         const t = this.tripWithDisputeBy(user, open);
         if (t) return this.agreeDispute(user, t);
-        return this.say(user, `Nothing's waiting on you right now. Text TOTAL to see where you stand.`);
+        const own = this.tripWithDisputeAgainst(user, open);
+        if (own) return this.approve(user, own);
+        return this.say(user, `Nothing's waiting on you right now. Ask me what you owe any time.`);
       }
       default:
-        return this.say(user, `Not sure what you mean. Text me a receipt or something like "paid $40 for snacks". Text HELP for more.`);
+        return this.say(user, `I didn't catch that. You can send me a receipt, tell me what you paid ("$40 for gas"), or ask what you owe.`);
     }
   }
 
@@ -270,12 +277,7 @@ export class Tab {
   private async askTripPick(user: User, open: Trip[], suggested: Trip, msg: Inbound, photo: boolean) {
     this.held.set(user.id, msg);
     this.store.setPending(user.id, "awaiting_trip_pick", { options: open.map((t) => t.id), suggested: suggested.id }, this.now());
-    const names = open.map((t, i) => `${i + 1}) ${shortTripName(t)}`).join("  ");
-    await this.say(
-      user,
-      `Which trip is that ${photo ? "receipt" : ""}for? ${names}\nReply the name or number, or YES for ${shortTripName(suggested)}. ` +
-        `(Tip: say it inline next time, like "$80 gas, ${shortTripName(suggested).toLowerCase()}".)`,
-    );
+    await this.say(user, `Which trip is that ${photo ? "receipt " : ""}for, ${listNames(open.map((t) => shortTripName(t)), "or")}?`);
   }
 
   /** The open trip where someone disputed one of this payer's charges, if any. */
@@ -290,12 +292,12 @@ export class Tab {
 
   private async listTrips(user: User, open: Trip[]) {
     const lines = open.map((t) => `• ${t.name}: ${this.runningLine(user.id, t.id)}`);
-    await this.say(user, `Your open trips:\n${lines.join("\n")}\nName the trip when you log something ("$80 gas, ${shortTripName(open[0]!).toLowerCase()}"), or "close <trip>" when one's over.`);
+    await this.say(user, `Your open trips:\n${lines.join("\n")}`);
   }
 
   private async balanceAll(user: User, open: Trip[]) {
     const lines = open.map((t) => `${t.name}: ${this.runningLine(user.id, t.id)}`);
-    await this.say(user, `${lines.join("\n")}\nReply TOTAL + trip name for the full picture, or PAY + trip name to settle one.`);
+    await this.say(user, lines.join("\n"));
     for (const t of open) this.store.setPaymentNudge(t.id, user.id, this.now());
   }
 
@@ -338,10 +340,10 @@ export class Tab {
       const detail = blocked
         .map((t) => `${t.name} isn't settled yet: ${listNames(plans.get(t.id)!.map((d) => `${this.nameOf(this.store.user(d.from))} owes ${this.nameOf(this.store.user(d.to))} ${fmt(d.cents)}`))}.`)
         .join("\n");
-      const again = blocked.length === 1 && targets.length === 1 ? `close ${shortTripName(blocked[0]!).toLowerCase()} anyway` : "close all anyway";
-      parts.push(`${detail}\nReply SETTLE to sort it out, "we settled it ourselves" if the money already changed hands, or "${again}" to close ${blocked.length === 1 ? "it" : "them"} as is.`);
+      this.store.setPending(user.id, "awaiting_close_decision", { tripIds: blocked.map((t) => t.id) }, now);
+      parts.push(`${detail}\nDid you all settle that outside ${this.cfg.botName}, or should I keep ${blocked.length === 1 ? "it" : "them"} open until it's paid?`);
     }
-    const left = open.filter((t) => !closing.includes(t));
+    const left = open.filter((t) => !closing.some((c) => c.id === t.id));
     if (closing.length && left.length) parts.push(`You're still in ${listNames(left.map((t) => t.name))}.`);
     await this.say(user, parts.join("\n"));
   }
@@ -407,7 +409,7 @@ export class Tab {
     await this.say(user, `${name} created! Friends can text ${this.cfg.botName} "JOIN ${trip.code}", or forward them this link:`);
     await this.say(user, this.inviteLink(trip));
     if (others.length) {
-      await this.say(user, `You're also in ${listNames(others.map((t) => t.name))}, so name the trip when you log something, like "$80 gas, ${shortTripName(trip).toLowerCase()}". Text "close <trip>" when one is over.`);
+      await this.say(user, `You're also in ${listNames(others.map((t) => t.name))}, so just mention which trip when you log something ("$80 gas, ${shortTripName(trip).toLowerCase()}").`);
     }
     if (!user.name) {
       this.store.setPending(user.id, "awaiting_name", {}, this.now());
@@ -452,7 +454,7 @@ export class Tab {
   }
 
   private welcomeTip() {
-    return `Text me receipts or things like "paid $40 for snacks." I'll keep track; text TOTAL any time to see where you stand.`;
+    return `Send me receipts or tell me what you paid ("$40 for snacks") and I'll keep track. Ask me what you owe any time, and if something's ever wrong, just say so.`;
   }
 
   /** Every member gets a custodial devnet wallet with test USDC. Nobody sees the crypto side. */
@@ -516,7 +518,7 @@ export class Tab {
         if (!text || msg.images.length) return false;
         this.store.clearPending(user.id);
         if (/^(no|nah|nevermind|never mind|cancel|stop)\b/i.test(text)) {
-          await this.say(user, `No problem. Text "new trip <name>" whenever you're ready.`);
+          await this.say(user, `No problem. Tell me whenever you're ready.`);
           return true;
         }
         const name = heuristicTripName(text) ?? text.replace(/^(?:call it|name it|it'?s|let'?s say|how about)\s+/i, "");
@@ -539,13 +541,96 @@ export class Tab {
         return true;
       }
 
-      case "awaiting_receipt": {
-        if (!msg.images.length || !trip) {
+      case "awaiting_dispute_answer": {
+        const expense = this.store.expense(p.expenseId);
+        const expTrip = this.store.trip(expense.trip_id);
+        if (msg.images.length) {
+          this.store.clearPending(user.id);
+          await this.attachReceipt(user, expTrip, expense, msg);
+          return true;
+        }
+        if (!text) return false;
+        const disputer = this.store.user(p.disputerId);
+        const who = this.nameOf(disputer);
+        const choice = await this.ai.choose(
+          text,
+          `Should I take ${who} off ${expense.description}, or do you have a receipt?`,
+          [
+            { key: "drop", means: `yes, take ${who} off it / they're right / fine / fair`, hints: /^(yes|yeah|yep|ya|sure|ok(ay)?|fine|fair|agree|drop|take|remove|go ahead|do it|they'?re right|(he|she)'?s right)\b/i },
+            { key: "keep", means: `no, ${who} did have it / the charge stands / I'll find the receipt later`, hints: /^(no|nah|nope|keep|(he|she|they) (did|had|was|were|definitely)|wrong|not true|stands)\b/i },
+            { key: "undo", means: `remove the whole expense for everyone`, hints: /\b(undo|delete|scrap|whole thing|remove it (all|entirely))\b/i },
+          ],
+          this.ctx(user, expTrip, false),
+        );
+        if (!choice) {
           this.store.clearPending(user.id);
           return false;
         }
         this.store.clearPending(user.id);
-        await this.attachReceipt(user, trip, this.store.expense(p.expenseId), msg);
+        if (choice === "drop") await this.agreeDispute(user, expTrip, who);
+        else if (choice === "undo") await this.undo(user, [expTrip]);
+        else {
+          await this.say(user, `Okay. ${who}'s share stays off the total until one of you changes your mind; a receipt photo settles it any time.`);
+          await this.say(disputer, `${this.nameOf(user)} says you did have ${expense.description}. It stays off your total for now; if you're fine counting it after all, just say so.`);
+        }
+        return true;
+      }
+
+      case "awaiting_close_decision": {
+        if (!text || msg.images.length) return false;
+        const trips = p.tripIds.map((id) => this.store.trip(id)).filter((t) => !t.closed_at);
+        const open = this.store.openTripsFor(user.id);
+        const names = listNames(trips.map((t) => t.name));
+        const choice = await this.ai.choose(
+          text,
+          `${names} isn't settled yet. Did you all settle that outside ${this.cfg.botName}, or should I keep it open until it's paid?`,
+          [
+            { key: "settled_outside", means: "yes, the money was already handled between them (cash, Venmo, in person); close it and mark it settled", hints: /\b(yes|yeah|yep|ya|sorted|settled|handled|paid|venmo|cash|in person|we did|we'?re good|all good|square)\b/i },
+            { key: "close_anyway", means: "close it anyway and leave the balances showing as still owed", hints: /\b(anyways?|regardless|still owe|leave it|as is|just close|don'?t care|whatever)\b/i },
+            { key: "keep_open", means: "no, keep the trip open for now / not yet / wait", hints: /^(no|nah|nope|not yet|wait|keep|leave it open|hold)\b/i },
+            { key: "settle_now", means: `settle it through ${this.cfg.botName} now (send the payment requests)`, hints: /\b(settle|send|request|through tab|pay now|ask them)\b/i },
+          ],
+          this.ctx(user, trips[0], false),
+        );
+        if (!choice) {
+          this.store.clearPending(user.id);
+          return false;
+        }
+        this.store.clearPending(user.id);
+        if (choice === "settled_outside") await this.closeTrips(user, trips, open, { settledOutside: true });
+        else if (choice === "close_anyway") await this.closeTrips(user, trips, open, { force: true });
+        else if (choice === "settle_now") await this.settle(user, trips, msg);
+        else await this.say(user, `Okay, I'll leave ${names} open.`);
+        return true;
+      }
+
+      case "awaiting_yes_no": {
+        if (!text || msg.images.length) return false;
+        const choice = await this.ai.choose(
+          text,
+          p.question,
+          [
+            { key: "yes", means: "yes, do it", hints: /^(yes|yeah|yep|ya|sure|ok(ay)?|please|do it|go ahead|yes please|close it|sounds good)\b/i },
+            { key: "no", means: "no, don't / not yet / leave it", hints: /^(no|nah|nope|not yet|leave it|don'?t|wait|hold)\b/i },
+          ],
+          this.ctx(user, trip, false),
+        );
+        if (!choice) {
+          this.store.clearPending(user.id);
+          return false;
+        }
+        this.store.clearPending(user.id);
+        if (choice === "no") {
+          await this.say(user, "Okay, leaving it as is.");
+          return true;
+        }
+        if (p.action === "close_trip") {
+          const t = this.store.trip(p.id);
+          await this.closeTrips(user, [t], this.store.openTripsFor(user.id), {});
+        } else {
+          const e = this.store.expense(p.id);
+          await this.undoExpense(user, e);
+        }
         return true;
       }
 
@@ -743,7 +828,7 @@ export class Tab {
     await this.say(payer, `Logged to ${trip.name}: ${expense.description} ${fmt(totalCents)} · ${this.splitSummary(split, byItem)}${note}. ${told}`);
 
     for (const u of others) {
-      await this.say(u, `${this.nameOf(payer)} logged ${expense.description} ${fmt(totalCents)}${this.onTrip(u, trip)} · your share ${fmt(split.get(u.id)!)}. ${REPLY_HINT}`);
+      await this.say(u, `${this.nameOf(payer)} logged ${expense.description} ${fmt(totalCents)}${this.onTrip(u, trip)} · your share ${fmt(split.get(u.id)!)}.`);
       this.store.markNotified(expense.id, u.id, now);
       this.store.setPaymentNudge(trip.id, u.id, now);
     }
@@ -770,7 +855,7 @@ export class Tab {
     });
     const mismatch =
       receipt && receipt.total_cents !== expense.total_cents
-        ? ` Heads up: the receipt says ${fmt(receipt.total_cents)} but the expense is ${fmt(expense.total_cents)}. Reply UNDO and log it again if that's wrong.`
+        ? ` Heads up: the receipt says ${fmt(receipt.total_cents)} but the expense is ${fmt(expense.total_cents)}. If the receipt's right, tell me to undo it and log it again.`
         : "";
     const settled = disputers.length ? ` ${listNames(disputers.map((s) => this.nameOf(this.store.user(s.user_id))))} ${disputers.length === 1 ? "is" : "are"} counted again.` : "";
     await this.say(payer, `Receipt added to ${expense.description}.${settled}${mismatch}`);
@@ -778,7 +863,7 @@ export class Tab {
       await this.say(
         this.store.user(s.user_id),
         `${this.nameOf(payer)} added a receipt for ${expense.description} ${fmt(expense.total_cents)}, so your ${fmt(s.cents)} counts again. ` +
-          `Reply DISPUTE + reason if it's still wrong.`,
+          `If it's still wrong, tell me.`,
       );
       this.store.markNotified(expense.id, s.user_id, now);
     }
@@ -795,7 +880,7 @@ export class Tab {
       await this.say(user, `Counting ${disputed.expense.description} ${fmt(disputed.cents)} again.`);
       return this.say(payer, `${this.nameOf(user)} is fine with ${disputed.expense.description} after all. No receipt needed.`);
     }
-    await this.say(user, `No need to approve anything: shares count as soon as they're logged. ${REPLY_HINT}`);
+    await this.say(user, `Nothing needs approving here, shares count as soon as they're logged. If something's off, just tell me.`);
   }
 
   private async dispute(user: User, trips: Trip[], reason: string) {
@@ -810,14 +895,14 @@ export class Tab {
     const payer = this.store.user(target.expense.payer_id);
     await this.say(
       user,
-      `Disputed ${target.expense.description}${this.onTrip(user, trip)}. Your ${fmt(target.cents)} won't count until ${this.nameOf(payer)} adds a receipt or takes you off it. ` +
-        `(Reply YES if you change your mind.)`,
+      `Got it. I've taken ${target.expense.description} (${fmt(target.cents)})${this.onTrip(user, trip)} off your total until ${this.nameOf(payer)} adds a receipt or agrees. ` +
+        `If you change your mind, just say so.`,
     );
-    this.store.setPending(payer.id, "awaiting_receipt", { expenseId: target.expense_id }, this.now());
+    this.store.setPending(payer.id, "awaiting_dispute_answer", { expenseId: target.expense_id, disputerId: user.id }, this.now());
     await this.say(
       payer,
       `${this.nameOf(user)} disputed ${target.expense.description}${this.onTrip(payer, trip)} (${fmt(target.cents)})${reason ? `: "${reason}"` : ""}. ` +
-        `Send me a receipt photo, reply AGREE to take ${this.nameOf(user)} off it, or UNDO to remove the whole thing.`,
+        `Should I take ${this.nameOf(user)} off it, or do you have a receipt?`,
     );
   }
 
@@ -834,11 +919,15 @@ export class Tab {
     }
     if (!who) return this.say(payer, "Nobody has disputed anything of yours right now.");
     if (disputed.length > 1 && !named) {
-      return this.say(payer, `${listNames(disputed.map((s) => this.nameOf(this.store.user(s.user_id))))} disputed ${expense.description}. Reply "remove <name>" for whoever's right.`);
+      return this.say(payer, `${listNames(disputed.map((s) => this.nameOf(this.store.user(s.user_id))))} both disputed ${expense.description}. Who should come off it?`);
     }
 
     const remaining = shares.filter((s) => s.user_id !== who!.user_id);
-    if (!remaining.length) return this.say(payer, `That would leave nobody on ${expense.description}. Reply UNDO to remove it instead.`);
+    if (!remaining.length) {
+      const q = `That would leave nobody on ${expense.description}, so I'd have to remove it entirely. Want me to?`;
+      this.store.setPending(payer.id, "awaiting_yes_no", { action: "undo_expense", id: expense.id, question: q }, this.now());
+      return this.say(payer, q);
+    }
     const even = remaining.every((s) => Math.abs(s.cents - remaining[0]!.cents) <= 1) && Math.abs(who.cents - remaining[0]!.cents) <= 1;
     const topUp = splitEven(who.cents, remaining.map((s) => s.user_id));
     const next = new Map(remaining.map((s) => [s.user_id, even ? 0 : s.cents + (topUp.get(s.user_id) ?? 0)]));
@@ -859,7 +948,7 @@ export class Tab {
       const u = this.store.user(s.user_id);
       await this.say(
         u,
-        `${this.nameOf(dropped)} came off ${expense.description} ${fmt(expense.total_cents)}, so your share is now ${fmt(next.get(s.user_id)!)}. ${REPLY_HINT}`,
+        `${this.nameOf(dropped)} came off ${expense.description} ${fmt(expense.total_cents)}, so your share is now ${fmt(next.get(s.user_id)!)}.`,
       );
       this.store.setPaymentNudge(trip.id, u.id, now);
     }
@@ -868,6 +957,10 @@ export class Tab {
   private async undo(user: User, trips: Trip[]) {
     const e = this.store.lastExpenseByAcross(user.id, trips.map((t) => t.id));
     if (!e) return this.say(user, "You haven't logged anything I can undo.");
+    return this.undoExpense(user, e);
+  }
+
+  private async undoExpense(user: User, e: Expense) {
     const affected = this.store.shares(e.id).filter((s) => s.user_id !== user.id);
     this.store.deleteExpense(e.id);
     this.store.clearPending(user.id);
@@ -879,7 +972,17 @@ export class Tab {
 
   // ------------------------------------------------------------------ explaining & settling
 
-  private async why(user: User, trip: Trip) {
+  private async why(user: User, trips: Trip[]) {
+    if (trips.length > 1) {
+      const relevant = trips.filter((t) => breakdownFor(this.store, t.id, user.id).lines.length || (tripLedger(this.store, t.id).net.get(user.id) ?? 0) !== 0);
+      if (!relevant.length) return this.say(user, `You don't owe anything on any trip 🎉`);
+      for (const t of relevant) await this.whyOne(user, t);
+      return;
+    }
+    return this.whyOne(user, trips[0]!);
+  }
+
+  private async whyOne(user: User, trip: Trip) {
     const { lines, paid } = breakdownFor(this.store, trip.id, user.id);
     const { net } = tripLedger(this.store, trip.id);
     const counted = lines.filter((l) => l.share.status !== "disputed");
@@ -900,13 +1003,13 @@ export class Tab {
     });
     const paidTotal = paid.reduce((a, t) => a + t.cents, 0);
     const paidLine = paidTotal ? `\nYou've already paid ${fmt(paidTotal)}.` : "";
-    await this.say(user, `You owe ${fmt(total)} total:\n${bullets.join("\n")}${paidLine}`);
+    await this.say(user, `You owe ${fmt(total)} total${this.onTrip(user, trip)}:\n${bullets.join("\n")}${paidLine}`);
   }
 
   private async balance(user: User, trip: Trip) {
     const { net } = tripLedger(this.store, trip.id);
     const mine = net.get(user.id) ?? 0;
-    const bottom = mine < 0 ? `Net: you owe ${fmt(-mine)}. Reply PAY to settle up or WHY for every line.` : mine > 0 ? `Net: you're owed ${fmt(mine)}.` : `Net: all square 🎉`;
+    const bottom = mine < 0 ? `Overall you owe ${fmt(-mine)}. Say pay whenever you're ready, or ask me why.` : mine > 0 ? `Overall you're owed ${fmt(mine)}.` : `All square 🎉`;
     await this.say(user, `${trip.name} running total: ${this.runningLine(user.id, trip.id)}.\n${bottom}\nEverything, line by line: ${this.pageLink(trip, user)}`);
     this.store.setPaymentNudge(trip.id, user.id, this.now());
   }
@@ -938,7 +1041,7 @@ export class Tab {
       await this.say(
         target,
         `👋 ${this.nameOf(user)} asked me to remind you: you owe ${this.nameOf(user)} ${fmt(owesMe)} for ${trip.name}. ` +
-          `Running total: ${this.runningLine(id, trip.id)}. Reply PAY to settle up or WHY for every line.`,
+          `Running total: ${this.runningLine(id, trip.id)}. Say pay whenever you're ready, or ask me why.`,
       );
       this.store.setPaymentNudge(trip.id, id, now);
       reminded.push(`${this.nameOf(target)} (${fmt(owesMe)})`);
@@ -969,7 +1072,10 @@ export class Tab {
     return listNames(debts.map((d) => `${this.nameOf(this.store.user(d.to))} ${fmt(d.cents)}`));
   }
 
-  private async settle(user: User, trip: Trip) {
+  private async settle(user: User, trips: Trip[], msg: Inbound) {
+    const withBalances = trips.filter((t) => tripLedger(this.store, t.id).plan.length);
+    if (trips.length > 1 && withBalances.length > 1) return this.askTripPick(user, withBalances, withBalances[0]!, { ...msg, text: "SETTLE" }, false);
+    const trip = withBalances[0] ?? trips[0]!;
     const { plan } = tripLedger(this.store, trip.id);
     const now = this.now();
     this.store.markSettleRequested(trip.id, now);
@@ -981,8 +1087,8 @@ export class Tab {
       const u = this.store.user(id);
       await this.say(
         u,
-        `You owe ${this.debtList(plan.filter((d) => d.from === id))} for ${trip.name}.\n` +
-          `• Reply PAY to send USDC from your ${this.cfg.botName} wallet\n• Reply WHY for the breakdown.`,
+        `You owe ${this.debtList(plan.filter((d) => d.from === id))} for ${trip.name}. ` +
+          `Say pay and I'll send it from your ${this.cfg.botName} wallet, or ask me why if that looks off.`,
       );
       this.store.setPaymentNudge(trip.id, id, now);
     }
@@ -999,11 +1105,12 @@ export class Tab {
     }
   }
 
-  private async pay(user: User, trip: Trip) {
+  /** Pay everything the person owes across the given trips in one go. */
+  private async pay(user: User, trips: Trip[]) {
     if (this.paying.has(user.id)) return this.say(user, "Hang on, your last payment is still going through ⏳");
     this.paying.add(user.id);
     try {
-      const debts = tripLedger(this.store, trip.id).plan.filter((d) => d.from === user.id);
+      const debts = trips.flatMap((trip) => tripLedger(this.store, trip.id).plan.filter((d) => d.from === user.id).map((d) => ({ ...d, trip })));
       if (!debts.length) return await this.say(user, "You don't owe anything right now 🎉");
       await this.ensureWallet(user);
       const me = this.store.user(user.id);
@@ -1013,35 +1120,42 @@ export class Tab {
         return await this.say(user, `Your ${this.cfg.botName} wallet only has ${fmt(bal)} USDC, but you owe ${fmt(total)}.`);
       }
 
-      const sent: { to: User; cents: number; sig: string }[] = [];
+      const several = this.store.openTripsFor(user.id).length > 1;
+      const sent: { to: User; cents: number; sig: string; trip: Trip }[] = [];
       for (const d of debts) {
         const to = this.store.user(d.to);
         if (!to.pubkey) await this.ensureWallet(to);
         const toPub = this.store.user(d.to).pubkey!;
         try {
           const sig = await this.chain.transfer(me.enc_secret!, toPub, d.cents);
-          this.store.recordTransfer({ trip_id: trip.id, from_id: me.id, to_id: to.id, cents: d.cents, tx_sig: sig, status: "sent", created_at: this.now() });
-          sent.push({ to, cents: d.cents, sig });
+          this.store.recordTransfer({ trip_id: d.trip.id, from_id: me.id, to_id: to.id, cents: d.cents, tx_sig: sig, status: "sent", created_at: this.now() });
+          sent.push({ to, cents: d.cents, sig, trip: d.trip });
         } catch (err) {
           console.error("[chain] transfer failed:", err);
-          await this.say(user, `⚠️ Payment to ${this.nameOf(to)} failed. Nothing else was sent after it. Try PAY again in a minute.`);
+          await this.say(user, `⚠️ Payment to ${this.nameOf(to)} failed. Nothing else was sent after it. Try again in a minute.`);
           break;
         }
       }
       if (!sent.length) return;
 
       const sentTotal = sent.reduce((a, s) => a + s.cents, 0);
-      const parts = sent.map((s) => `${this.nameOf(s.to)} ${money(s.cents)}`).join(", ");
+      const label = (x: { to: User; trip: Trip }) => `${this.nameOf(x.to)}${several ? ` (${x.trip.name})` : ""}`;
+      const parts = sent.map((x) => `${label(x)} ${money(x.cents)}`).join(", ");
       const links =
         sent.length === 1
           ? ` · view on Solana: ${this.chain.explorerUrl(sent[0]!.sig)}`
-          : `\n${sent.map((s) => `${this.nameOf(s.to)}: ${this.chain.explorerUrl(s.sig)}`).join("\n")}`;
+          : `\n${sent.map((x) => `${label(x)}: ${this.chain.explorerUrl(x.sig)}`).join("\n")}`;
       await this.say(user, `✅ Sent ${fmt(sentTotal)} USDC: ${parts}${links}`);
-      if (!tripLedger(this.store, trip.id).plan.length) {
-        await this.say(user, `That squares up ${trip.name}. Text "close ${shortTripName(trip).toLowerCase()}" when you're done with it.`);
+      for (const x of sent) {
+        await this.say(x.to, `💸 ${this.nameOf(me)} paid you ${fmt(x.cents)} USDC for ${x.trip.name}. ${this.chain.explorerUrl(x.sig)}`);
       }
-      for (const s of sent) {
-        await this.say(s.to, `💸 ${this.nameOf(me)} paid you ${fmt(s.cents)} USDC for ${trip.name}. ${this.chain.explorerUrl(s.sig)}`);
+      const squared = [...new Set(sent.map((x) => x.trip.id))].map((id) => this.store.trip(id)).filter((t) => !tripLedger(this.store, t.id).plan.length);
+      if (squared.length === 1) {
+        const q = `That squares up ${squared[0]!.name}. Want me to close it?`;
+        this.store.setPending(user.id, "awaiting_yes_no", { action: "close_trip", id: squared[0]!.id, question: q }, this.now());
+        await this.say(user, q);
+      } else if (squared.length > 1) {
+        await this.say(user, `That squares up ${listNames(squared.map((t) => t.name))}. Tell me when you want them closed.`);
       }
     } finally {
       this.paying.delete(user.id);
@@ -1089,8 +1203,8 @@ export class Tab {
         if (now - last < this.cfg.reminderGapMs) continue;
         await this.say(
           this.store.user(userId),
-          `Daily total for ${trip.name}: ${this.runningLine(userId, trip.id)}. Net: you owe ${fmt(-cents)}. ` +
-            `Reply PAY to settle up, WHY for every line, or DISPUTE + reason if something's off.`,
+          `Daily total for ${trip.name}: ${this.runningLine(userId, trip.id)}. Overall you owe ${fmt(-cents)}. ` +
+            `Say pay whenever you're ready, ask me why, or tell me if something's off.`,
         );
         this.store.setPaymentNudge(trip.id, userId, now);
       }
@@ -1128,6 +1242,7 @@ export class Tab {
       tripName: trip?.name ?? null,
       openTripNames: this.store.openTripsFor(user.id).map((t) => t.name),
       openDispute: trip ? Boolean(this.store.disputedExpenseFor(user.id, trip.id)) : false,
+      ownDispute: trip ? this.store.disputedSharesFor(user.id, trip.id).length > 0 : false,
     };
   }
 

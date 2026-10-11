@@ -159,7 +159,7 @@ describe("joining from the web invite", () => {
     }
     await bot.handle({ phone: AMIT, text: "paid $30 for coffee, everyone", images: [] });
     await bot.handle({ phone: JAKE, text: "DISPUTE I wasn't at coffee", images: [] });
-    expect(m.to(AMIT).at(-1)).toContain("reply AGREE to take Jake off it");
+    expect(m.to(AMIT).at(-1)).toContain("Should I take Jake off it, or do you have a receipt?");
     await bot.handle({ phone: AMIT, text: "agree", images: [] });
     expect(m.to(AMIT).at(-1)).toBe("Done. Jake is off Coffee; it's now split 2 ways ($15 each).");
     expect(m.to(JAKE).at(-1)).toContain("you're off Coffee");

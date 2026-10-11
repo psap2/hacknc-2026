@@ -1,6 +1,6 @@
 import type { Receipt } from "../ledger/split.js";
 import { parseCents } from "../ledger/split.js";
-import type { AI, Intent, InterpretContext, ItemAssignment, SplitSpec } from "./types.js";
+import type { AI, Choice, Intent, InterpretContext, ItemAssignment, SplitSpec } from "./types.js";
 
 const EVERYONE = /\b(everyone|everybody|all of us|all|evenly|equally|split \d+ ways|\d+ ways|whole group)\b/i;
 const BY_ITEM = /\b(by item|itemi[sz]e|per item|who had what|each item)\b/i;
@@ -101,7 +101,7 @@ export function heuristicIntent(text: string, ctx: InterpretContext): Intent {
   const remind = t.match(/\b(?:remind|nudge|poke|bug)\s+(.+?)[.!?]*$/i);
   if (remind) return { kind: "remind", names: remind[1]!.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean) };
   if (/\b(dispute|that'?s (wrong|not right)|not mine|wasn'?t (me|there))\b/i.test(t)) return { kind: "dispute", reason: t };
-  if (ctx.openDispute && /^(agree|agreed|fine|fair( enough)?|ok(ay)?|sure|yeah|yes|you'?re right)\b/i.test(t)) return { kind: "agree" };
+  if ((ctx.openDispute || ctx.ownDispute) && /^(agree|agreed|fine|fair( enough)?|ok(ay)?|sure|yeah|yes|you'?re right|count it)\b/i.test(t)) return { kind: "agree" };
   const amountCents = heuristicAmount(t);
   if (amountCents === null && !ctx.hasImage) {
     const tripName = heuristicTripName(t);
@@ -155,8 +155,17 @@ export function heuristicAssign(
   return [...out].sort((a, b) => a[0] - b[0]).map(([item, set]) => ({ item, names: [...set] }));
 }
 
+export function heuristicChoose(text: string, options: Choice[]): string | null {
+  const t = text.trim();
+  if (!t) return null;
+  return options.find((o) => o.hints?.test(t))?.key ?? null;
+}
+
 /** AI implementation with no model: used when GEMINI_API_KEY is missing, and in tests. */
 export class HeuristicAI implements AI {
+  async choose(text: string, _question: string, options: Choice[]): Promise<string | null> {
+    return heuristicChoose(text, options);
+  }
   async readReceipt(): Promise<Receipt | null> {
     return null;
   }
