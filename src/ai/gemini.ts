@@ -181,7 +181,7 @@ People text casually. Read for meaning, not keywords. Classify the message:
 - rename: wants a different name ("call me PJ").
 - undo: take back the last thing they logged.  - link: wants the invite link or trip page.
 - why: asks why they owe / wants a breakdown.  - balance: asks what they owe or are owed, their total or running total, or where they stand.
-- settle: wants to settle up.  - pay: wants to pay what they owe.  - help: asks how Tab works.
+- settle: wants to settle up.  - pay: wants to pay what they owe ("pay", "pay amit", "send ayug his money"); people = who, if named.  - help: asks how Tab works.
 - unknown: chit-chat or anything Tab doesn't do. Never invent an expense from small talk.
 
 For expenses, work out who shares it:
@@ -207,6 +207,8 @@ Message: """${text}"""`,
           return { kind: "remind", names: out.people ?? [] };
         case "rename":
           return { kind: "rename", name: out.new_name?.trim() || null };
+        case "pay":
+          return { kind: "pay", names: (out.people ?? []).filter((n) => !/^(me|everyone|all)$/i.test(n)) };
         case "expense":
           break;
         default:

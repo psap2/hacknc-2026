@@ -80,6 +80,9 @@ export function heuristicIntent(text: string, ctx: InterpretContext): Intent {
   if (/\bwhy\b|how much do i owe|breakdown/i.test(t)) return { kind: "why" };
   if (/^(balance|balances|total|totals|what do i owe|status)\b|\b(my|running) total\b|where do i stand/i.test(t)) return { kind: "balance" };
   if (/^(undo|take that back|delete that|remove that|scratch that|cancel that)\b/i.test(t)) return { kind: "undo" };
+  if (/^(settle( up)?|let'?s settle|settle it)[.!]*$/i.test(t)) return { kind: "settle" };
+  const pay = t.match(/^(?:pay|send)\s*(?:back\s+)?(?!me\b)([a-z][a-z' ,&]*?)?(?:\s+(?:back|his money|her money|their money|what i owe))?[.!]*$/i);
+  if (pay && heuristicAmount(t) === null) return { kind: "pay", names: (pay[1] ?? "").split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean) };
   // The trip name may already have been stripped by the router ("we're done with nyc" -> "we're done with").
   const close =
     t.match(/^(?:we'?re |i'?m )?(?:all )?done with\s*(?:the\s+)?(.*?)(?:\s+(?:trips?|tabs?))?\s*(?:anyways?|regardless)?[.!]*$/i) ??

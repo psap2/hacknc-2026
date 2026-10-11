@@ -25,7 +25,9 @@ export type Intent =
   /** Nudge named people (or "everyone") about what they owe. */
   | { kind: "remind"; names: string[] }
   | { kind: "rename"; name: string | null }
-  | { kind: "why" | "balance" | "settle" | "pay" | "help" | "undo" | "link" | "agree" }
+  /** Pay what they owe; names = only these people, if they said who ("pay amit"). */
+  | { kind: "pay"; names: string[] }
+  | { kind: "why" | "balance" | "settle" | "help" | "undo" | "link" | "agree" }
   | { kind: "unknown" };
 
 export interface InterpretContext {

@@ -159,7 +159,7 @@ export class Tab {
     const scope = named ? [trip] : open;
     if (cmd === "WHY") return this.why(user, scope);
     if (/^(SETTLE|SETTLE UP)$/.test(cmd)) return this.settle(user, scope, msg);
-    if (cmd === "PAY") return this.pay(user, scope);
+    if (cmd === "PAY") return this.pay(user, scope, []);
     if (/^(BALANCE|BALANCES|TOTAL|TOTALS|MY TOTAL|RUNNING TOTAL|STATUS)$/.test(cmd)) {
       return needsPick ? this.balanceAll(user, open) : this.balance(user, trip);
     }
@@ -193,7 +193,7 @@ export class Tab {
       case "settle":
         return this.settle(user, scope, msg);
       case "pay":
-        return this.pay(user, scope);
+        return this.pay(user, scope, intent.names);
       case "help":
         return this.help(user);
       case "new_trip":
@@ -1105,12 +1105,25 @@ export class Tab {
     }
   }
 
-  /** Pay everything the person owes across the given trips in one go. */
-  private async pay(user: User, trips: Trip[]) {
+  /** Pay everything the person owes across the given trips in one go, or just the people named ("pay amit"). */
+  private async pay(user: User, trips: Trip[], names: string[]) {
     if (this.paying.has(user.id)) return this.say(user, "Hang on, your last payment is still going through ⏳");
     this.paying.add(user.id);
     try {
-      const debts = trips.flatMap((trip) => tripLedger(this.store, trip.id).plan.filter((d) => d.from === user.id).map((d) => ({ ...d, trip })));
+      let debts = trips.flatMap((trip) => tripLedger(this.store, trip.id).plan.filter((d) => d.from === user.id).map((d) => ({ ...d, trip })));
+      if (names.length) {
+        const wanted = new Set<number>();
+        for (const trip of trips) {
+          const r = this.resolveNames(names, this.store.members(trip.id), user);
+          if (!("error" in r)) for (const id of r.ids) wanted.add(id);
+        }
+        if (!wanted.size) return await this.say(user, `I don't know who ${listNames(names)} is on ${listNames(trips.map((t) => t.name), "or")}.`);
+        const owedTo = listNames([...new Set(debts.map((d) => this.nameOf(this.store.user(d.to))))]);
+        debts = debts.filter((d) => wanted.has(d.to));
+        if (!debts.length) {
+          return await this.say(user, `You don't owe ${listNames([...wanted].map((id) => this.nameOf(this.store.user(id))))} anything right now${owedTo ? ` (it's ${owedTo} you owe)` : ""}.`);
+        }
+      }
       if (!debts.length) return await this.say(user, "You don't owe anything right now 🎉");
       await this.ensureWallet(user);
       const me = this.store.user(user.id);

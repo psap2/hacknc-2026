@@ -64,7 +64,23 @@ export function tripLedger(store: Store, tripId: number) {
     expenses,
     transfers,
   );
-  return { members, expenses, transfers, net, plan: minTransfers(net) };
+  return { members, expenses, transfers, net, plan: pairwisePlan(store, tripId, members.map((m) => m.id)) };
+}
+
+/**
+ * Who pays whom: each pair of people nets what they owe each other into one direction, after
+ * payments already made. This is the same model TOTAL, reminders and the trip page use, so
+ * "you owe Amit $25" and "pay" always agree. (minTransfers would route money through third
+ * people to save a payment or two, which reads as the wrong person getting paid.)
+ */
+export function pairwisePlan(store: Store, tripId: number, memberIds: number[]): Debt[] {
+  const plan: Debt[] = [];
+  for (const id of memberIds) {
+    for (const p of pairwise(store, tripId, id)) {
+      if (p.cents > 0) plan.push({ from: id, to: p.other, cents: p.cents });
+    }
+  }
+  return plan;
 }
 
 /** Line items explaining what one user owes, for WHY. Includes pending/disputed so nothing is hidden. */

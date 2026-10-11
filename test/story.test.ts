@@ -169,21 +169,25 @@ describe("the Asheville trip", () => {
     expect(m.last(JAKE)).toContain("Overall you owe $59.50.");
     expect(m.last(JAKE)).toContain("https://tab.test/t/");
 
-    // Priya settles: fewest payments, everything counted. Jake's $59.50 is routed as
-    // $52.50 to Amit + $7 to Priya (two payments) rather than one per person he owes.
+    // Priya settles. Person-to-person: Jake pays exactly who he owes (what TOTAL told him),
+    // never a third person picked to save a payment.
     m.clear();
     await say(PRIYA, "SETTLE");
-    expect(m.last(JAKE)).toContain("You owe Amit $52.50 and Priya $7.00 for Asheville Trip.");
+    expect(m.last(JAKE)).toContain("You owe Amit $20.00, Priya $32.00, and Sam $7.50 for Asheville Trip.");
     expect(m.last(JAKE)).toContain("Say pay and I'll send it from your Tab wallet");
 
-    // Jake pays
+    // "pay priya" pays just her; a bare PAY then clears the rest.
+    await say(JAKE, "pay priya");
+    expect(m.last(JAKE)).toMatch(/^✅ Sent \$32\.00 USDC: Priya \$32 · view on Solana/);
+    expect(m.last(PRIYA)).toContain("💸 Jake paid you $32.00 USDC");
     await say(JAKE, "PAY");
-    expect(m.last(JAKE)).toMatch(/^✅ Sent \$59\.50 USDC: Amit \$52\.50, Priya \$7\n/);
-    expect(m.last(AMIT)).toContain("💸 Jake paid you $52.50 USDC");
-    expect(m.last(PRIYA)).toContain("💸 Jake paid you $7.00 USDC");
+    expect(m.last(JAKE)).toMatch(/^✅ Sent \$27\.50 USDC: Amit \$20, Sam \$7\.50\n/);
+    expect(m.last(AMIT)).toContain("💸 Jake paid you $20.00 USDC");
     expect(await chain.balance(store.userByPhone(JAKE)!.pubkey!)).toBe(50000 - 5950);
     await say(JAKE, "PAY");
     expect(m.last(JAKE)).toBe("You don't owe anything right now 🎉");
+    await say(JAKE, "pay sam");
+    expect(m.last(JAKE)).toBe("You don't owe Sam anything right now.");
 
     // Reminders: one running-total text a day, only for people who owe, and never twice in a day.
     m.clear();
@@ -192,7 +196,7 @@ describe("the Asheville trip", () => {
     now += 25 * 3600_000;
     await bot.runJobs();
     expect(m.all(SAM)).toHaveLength(1);
-    expect(m.last(SAM)).toMatch(/^Daily total for Asheville Trip: you owe .*Overall you owe \$29\.50\. Say pay/);
+    expect(m.last(SAM)).toMatch(/^Daily total for Asheville Trip: you owe .*Overall you owe \$37\.00\. Say pay/); // Jake paid Sam $7.50 directly, so Sam owes more
     expect(m.all(JAKE)).toHaveLength(0); // paid up
     expect(m.all(AMIT)).toHaveLength(0); // owed, not owing
     await bot.runJobs();
@@ -201,7 +205,7 @@ describe("the Asheville trip", () => {
     // A creditor can poke someone directly; it only goes to people who actually owe them.
     m.clear();
     await say(PRIYA, "remind Sam and Jake");
-    expect(m.last(SAM)).toContain("👋 Priya asked me to remind you: you owe Priya $24.50 for Asheville Trip. Running total: you owe Amit $12.50 and Priya $24.50 · Jake owes you $7.50.");
+    expect(m.last(SAM)).toContain("👋 Priya asked me to remind you: you owe Priya $24.50 for Asheville Trip. Running total: you owe Amit $12.50 and Priya $24.50.");
     expect(m.all(JAKE)).toHaveLength(0);
     expect(m.last(PRIYA)).toBe("Reminded Sam ($24.50). Jake doesn't owe you anything right now.");
   });
