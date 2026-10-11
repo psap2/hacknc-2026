@@ -8,6 +8,8 @@ Tab is an AI agent with a real phone number. Friends on a trip text it receipts 
 
 Submitted to: **General track** · **Best iMessage Agent with Photon** · **MLH Best Use of Gemini API** · **MLH Best Use of Solana**
 
+🎥 **[Watch the demo video](https://vimeo.com/1234803827)**
+
 ## How it feels
 
 ```
