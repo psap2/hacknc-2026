@@ -130,8 +130,8 @@ describe("being in several trips at once", () => {
   it("closes a trip only once it's settled (or when told anyway), then stops asking", async () => {
     await say(JAKE, "$60 rental car, florida");
     await say(AMIT, "close florida");
-    expect(m.last(AMIT)).toBe('Florida Trip isn\'t settled yet: Amit owes Jake $30.00. Reply SETTLE to sort it out, or "close florida anyway" to close it as is.');
-    await say(AMIT, "close florida anyway");
+    expect(m.last(AMIT)).toBe('Florida Trip isn\'t settled yet: Amit owes Jake $30.00.\nReply SETTLE to sort it out, or "close florida anyway" to close it as is.');
+    await say(AMIT, "close florida anyways");
     expect(m.last(AMIT)).toContain("Closed Florida Trip.");
     expect(m.last(AMIT)).toContain("You're still in Nyc Trip.");
     expect(m.last(JAKE)).toContain("Amit closed Florida Trip (with balances still open).");
@@ -141,6 +141,21 @@ describe("being in several trips at once", () => {
     expect(m.last(AMIT)).toMatch(/^Logged to Nyc Trip: Pizza/);
     await say(AMIT, "we're done with nyc");
     expect(m.last(AMIT)).toMatch(/isn't settled yet/);
+  });
+
+  it("'end all active trips' closes what's settled and lists what isn't", async () => {
+    await say(JAKE, "$60 rental car, florida");
+    await say(AMIT, "end all active trips");
+    expect(m.last(AMIT)).toBe(
+      "Closed Nyc Trip.\nFlorida Trip isn't settled yet: Amit owes Jake $30.00.\n" +
+        'Reply SETTLE to sort it out, or "close all anyway" to close it as is.\nYou\'re still in Florida Trip.',
+    );
+    expect(m.last(SAM)).toContain("Amit closed Nyc Trip.");
+    await say(AMIT, "close all anyway");
+    expect(m.last(AMIT)).toContain("Closed Florida Trip.");
+    expect(store.openTripsFor(store.userByPhone(AMIT)!.id)).toHaveLength(0);
+    await say(AMIT, "paid $5 for gum");
+    expect(m.last(AMIT)).toContain("All your trips are closed.");
   });
 
   it("a new expense replaces the parked one instead of answering the question", async () => {

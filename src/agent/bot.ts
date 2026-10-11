@@ -129,8 +129,9 @@ export class Tab {
 
     // Which trip? One open trip: that one. Several: a trip named in the message wins ("$80 gas,
     // florida"); otherwise commands fall back to the trip they used last, and expenses get asked.
-    const closeCmd = text.match(/^(?:close|end|finish|archive|wrap up)\s+(?:the\s+|my\s+|our\s+)?(.*?)\s*(?:trip|tab)?\s*(anyway|regardless)?[.!]*$/i) ?? text.match(/^done with\s+(.+?)\s*(anyway)?[.!]*$/i);
-    const named = tripOverride ? undefined : this.matchTrip(open, closeCmd ? (closeCmd[1] ?? "") : text);
+    const closeCmd = text.match(/^close\s+(?:the\s+|my\s+)?(.*?)\s*(?:trips?|tabs?)?\s*(anyways?|regardless)?[.!]*$/i);
+    const closeAll = closeCmd ? /^(?:all|every|everything|both)\b/i.test(closeCmd[1] ?? "") : false;
+    const named = tripOverride ? undefined : this.matchTrip(open, closeCmd ? (closeAll ? "" : (closeCmd[1] ?? "")) : text);
     if (named === "ambiguous") {
       return this.say(user, `That could be ${listNames(open.map((t) => t.name), "or")}. Which one?`);
     }
@@ -143,7 +144,7 @@ export class Tab {
     const needsPick = !named && !tripOverride && open.length > 1;
     if (fresh.active_trip_id !== trip.id) this.store.setActiveTrip(user.id, trip.id);
 
-    if (closeCmd) return this.closeTrip(user, trip, open, Boolean(closeCmd[2]));
+    if (closeCmd) return this.closeTrips(user, closeAll ? open : [trip], open, Boolean(closeCmd[2]));
 
     if (/^(YES|Y|YEP|YEAH|OK|OKAY|APPROVE|APPROVED|👍)$/.test(cmd)) return this.approve(user, this.tripWithDisputeAgainst(user, open) ?? trip);
     const dispute = text.match(/^dispute\b[\s:,-]*(.*)$/is);
@@ -190,9 +191,10 @@ export class Tab {
       case "new_trip":
         return this.startTripFromIntent(user, intent.tripName);
       case "close_trip": {
+        if (intent.all) return this.closeTrips(user, open, open, intent.force);
         const target = intent.tripName ? this.matchTrip(open, intent.tripName) : undefined;
         if (target === "ambiguous") return this.say(user, `Which one: ${listNames(open.map((t) => t.name), "or")}?`);
-        return this.closeTrip(user, target?.trip ?? trip, open, false);
+        return this.closeTrips(user, [target?.trip ?? trip], open, intent.force);
       }
       case "dispute":
         return this.dispute(user, named ? [trip] : open, intent.reason ?? "");
@@ -294,19 +296,36 @@ export class Tab {
     for (const t of open) this.store.setPaymentNudge(t.id, user.id, this.now());
   }
 
-  private async closeTrip(user: User, trip: Trip, open: Trip[], force: boolean) {
-    const { plan } = tripLedger(this.store, trip.id);
-    if (plan.length && !force) {
-      const owed = listNames(plan.map((d) => `${this.nameOf(this.store.user(d.from))} owes ${this.nameOf(this.store.user(d.to))} ${fmt(d.cents)}`));
-      return this.say(user, `${trip.name} isn't settled yet: ${owed}. Reply SETTLE to sort it out, or "close ${shortTripName(trip).toLowerCase()} anyway" to close it as is.`);
+  /** Close one or more trips. Unsettled ones are refused unless `force` ("close florida anyway"). */
+  private async closeTrips(user: User, targets: Trip[], open: Trip[], force: boolean) {
+    const plans = new Map(targets.map((t) => [t.id, tripLedger(this.store, t.id).plan]));
+    const blocked = force ? [] : targets.filter((t) => plans.get(t.id)!.length);
+    const closing = targets.filter((t) => !blocked.includes(t));
+
+    for (const trip of closing) {
+      this.store.closeTrip(trip.id, this.now());
+      const openBalances = plans.get(trip.id)!.length > 0;
+      for (const m of this.store.members(trip.id)) {
+        if (m.id === user.id) continue;
+        await this.say(m, `${this.nameOf(user)} closed ${trip.name}${openBalances ? " (with balances still open)" : ""}. Everything's still on the trip page: ${this.pageLink(trip)}`);
+      }
     }
-    this.store.closeTrip(trip.id, this.now());
-    const others = this.store.members(trip.id).filter((m) => m.id !== user.id);
-    const left = open.filter((t) => t.id !== trip.id);
-    await this.say(user, `Closed ${trip.name}. The trip page stays up: ${this.pageLink(trip)}${left.length ? `\nYou're still in ${listNames(left.map((t) => t.name))}.` : ""}`);
-    for (const m of others) {
-      await this.say(m, `${this.nameOf(user)} closed ${trip.name}${plan.length ? " (with balances still open)" : ""}. Everything's still on the trip page: ${this.pageLink(trip)}`);
+
+    const parts: string[] = [];
+    if (closing.length) {
+      const pages = closing.length === 1 && targets.length === 1 ? ` The trip page stays up: ${this.pageLink(closing[0]!)}` : "";
+      parts.push(`Closed ${listNames(closing.map((t) => t.name))}.${pages}`);
     }
+    if (blocked.length) {
+      const detail = blocked
+        .map((t) => `${t.name} isn't settled yet: ${listNames(plans.get(t.id)!.map((d) => `${this.nameOf(this.store.user(d.from))} owes ${this.nameOf(this.store.user(d.to))} ${fmt(d.cents)}`))}.`)
+        .join("\n");
+      const again = blocked.length === 1 && targets.length === 1 ? `close ${shortTripName(blocked[0]!).toLowerCase()} anyway` : "close all anyway";
+      parts.push(`${detail}\nReply SETTLE to sort it out, or "${again}" to close ${blocked.length === 1 ? "it" : "them"} as is.`);
+    }
+    const left = open.filter((t) => !closing.includes(t));
+    if (closing.length && left.length) parts.push(`You're still in ${listNames(left.map((t) => t.name))}.`);
+    await this.say(user, parts.join("\n"));
   }
 
   /** "new trip" with no name: ask for one instead of creating "Our Trip". */
@@ -1089,6 +1108,7 @@ export class Tab {
       memberNames: trip ? this.store.members(trip.id).map((m) => this.nameOf(m)) : [],
       hasImage,
       tripName: trip?.name ?? null,
+      openTripNames: this.store.openTripsFor(user.id).map((t) => t.name),
       openDispute: trip ? Boolean(this.store.disputedExpenseFor(user.id, trip.id)) : false,
     };
   }

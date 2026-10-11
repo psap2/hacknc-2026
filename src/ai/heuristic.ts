@@ -81,8 +81,14 @@ export function heuristicIntent(text: string, ctx: InterpretContext): Intent {
   if (/^(balance|balances|total|totals|what do i owe|status)\b|\b(my|running) total\b|where do i stand/i.test(t)) return { kind: "balance" };
   if (/^(undo|take that back|delete that|remove that|scratch that|cancel that)\b/i.test(t)) return { kind: "undo" };
   // The trip name may already have been stripped by the router ("we're done with nyc" -> "we're done with").
-  const close = t.match(/^(?:we'?re |i'?m )?(?:all )?done with\s*(?:the\s+)?(.*?)(?:\s+(?:trip|tab))?[.!]*$/i) ?? t.match(/\b(?:close|archive|wrap up)\s+(?:the\s+)?(?:(.+?)\s+)?(?:trip|tab)\b/i);
-  if (close) return { kind: "close_trip", tripName: close[1]?.trim() || null };
+  const close =
+    t.match(/^(?:we'?re |i'?m )?(?:all )?done with\s*(?:the\s+)?(.*?)(?:\s+(?:trips?|tabs?))?\s*(?:anyways?|regardless)?[.!]*$/i) ??
+    t.match(/\b(?:close|end|finish|archive|wrap up|shut down)\s+(?:the\s+|my\s+|our\s+)?(?:(.+?)\s+)?(?:trips?|tabs?)\b/i);
+  if (close) {
+    const what = close[1]?.trim() ?? "";
+    const all = /\b(all|every|everything|both)\b/i.test(what);
+    return { kind: "close_trip", tripName: all ? null : what.replace(/\b(active|open|current)\b/gi, "").trim() || null, all, force: /\b(anyways?|regardless)\b/i.test(t) };
+  }
   if (/\b(invite|trip) (link|page)\b|send (me )?the link\b/i.test(t)) return { kind: "link" };
   const remind = t.match(/\b(?:remind|nudge|poke|bug)\s+(.+?)[.!?]*$/i);
   if (remind) return { kind: "remind", names: remind[1]!.split(/\s*(?:,|&|\band\b)\s*/i).filter(Boolean) };

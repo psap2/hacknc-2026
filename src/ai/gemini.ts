@@ -38,6 +38,8 @@ const INTENT_SCHEMA = {
       enum: ["expense", "new_trip", "close_trip", "dispute", "remind", "rename", "why", "balance", "settle", "pay", "help", "undo", "link", "agree", "unknown"],
     },
     trip_name: { type: ["string", "null"], description: "For new_trip/close_trip: the destination or name, Title Case, without the word 'trip'. null if not stated." },
+    all_trips: { type: "boolean", description: "For close_trip: true if the sender means every open trip ('end all my trips', 'close everything')." },
+    confirmed: { type: "boolean", description: "For close_trip: true if the sender says to close even though money is still owed ('anyway', 'regardless', 'I know, just close it')." },
     reason: { type: ["string", "null"], description: "For dispute: the sender's complaint in their own words." },
     people: { type: "array", items: { type: "string" }, description: "For remind: member names (exact spelling) or 'everyone'." },
     new_name: { type: ["string", "null"], description: "For rename: what the sender wants to be called." },
@@ -54,7 +56,7 @@ const INTENT_SCHEMA = {
     },
     include_sender: { type: "boolean", description: "Is the sender part of the split? Usually true." },
   },
-  required: ["kind", "trip_name", "reason", "people", "new_name", "amount_cents", "description", "split_mode", "split_names", "include_sender"],
+  required: ["kind", "trip_name", "all_trips", "confirmed", "reason", "people", "new_name", "amount_cents", "description", "split_mode", "split_names", "include_sender"],
 };
 
 const ASSIGN_SCHEMA = {
@@ -146,6 +148,8 @@ export class GeminiAI implements AI {
       const out = await this.json<{
         kind: Intent["kind"];
         trip_name: string | null;
+        all_trips: boolean;
+        confirmed: boolean;
         reason: string | null;
         people: string[];
         new_name: string | null;
@@ -160,12 +164,13 @@ export class GeminiAI implements AI {
             text: `You route text messages for Tab, a trip expense-splitting assistant that people talk to over iMessage.
 Sender: ${ctx.senderName}
 ${ctx.tripName ? `Current trip: ${ctx.tripName}\nTrip members: ${ctx.memberNames.join(", ")}` : "The sender is NOT in a trip yet."}
+${ctx.openTripNames.length > 1 ? `All of the sender's open trips: ${ctx.openTripNames.join(", ")}` : ""}
 ${ctx.openDispute ? "A friend has disputed one of the sender's charges and Tab asked the sender whether to drop it." : ""}
 The sender ${ctx.hasImage ? "ALSO attached a receipt photo (so an expense is very likely, amount may come from the photo)" : "did not attach a photo"}.
 
 People text casually. Read for meaning, not keywords. Classify the message:
 - new_trip: wants to start/plan a trip or tab ("i am going on a new trip to florida", "nashville next weekend, start a tab", "new trip"). trip_name = the place or name.
-- close_trip: the trip is over / wants to close or archive it ("we're done with florida", "close the nyc tab"). trip_name if said.
+- close_trip: the trip is over / wants to close, end or archive it ("we're done with florida", "close the nyc tab", "end all active trips"). trip_name = which one (match the open-trip list), all_trips if they mean every trip, confirmed if they insist despite open balances.
 - expense: the sender paid for something to split, or asks to be paid back ("pay me $30", "gas, everyone", "dinner, me jake and sam", "2,400 for flights").
 - dispute: pushes back on a charge ("that's wrong", "I wasn't at that dinner", "I didn't order drinks"). reason = their words.
 - agree: ${ctx.openDispute ? "accepts the friend's dispute (\"fine\", \"fair\", \"take her off\")" : "n/a (no open dispute) -> unknown"}.
@@ -192,7 +197,7 @@ Message: """${text}"""`,
         case "new_trip":
           return { kind: "new_trip", tripName: out.trip_name?.trim() || null };
         case "close_trip":
-          return { kind: "close_trip", tripName: out.trip_name?.trim() || null };
+          return { kind: "close_trip", tripName: out.trip_name?.trim() || null, all: Boolean(out.all_trips), force: Boolean(out.confirmed) };
         case "dispute":
           return { kind: "dispute", reason: out.reason?.trim() || text };
         case "remind":
