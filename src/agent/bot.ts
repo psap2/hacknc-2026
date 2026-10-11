@@ -5,6 +5,7 @@ import { breakdownFor, pairwise, tripLedger } from "../ledger/settle.js";
 import { type Receipt, receiptLooksConsistent, splitEven, splitItems } from "../ledger/split.js";
 import type { Inbound, Messenger } from "../messaging/types.js";
 import type { Chain } from "../solana/chain.js";
+import { viewerToken } from "../web/viewer.js";
 import { fmt, listNames, money, shortDate, titleCase } from "./format.js";
 
 export interface BotConfig {
@@ -13,6 +14,8 @@ export interface BotConfig {
   botPhone: string;
   startingBalanceCents: number;
   reminderGapMs: number;
+  /** Signs per-person trip-page links; any string, falls back to a fixed dev value. */
+  linkSecret?: string;
 }
 
 export interface BotDeps {
@@ -307,13 +310,13 @@ export class Tab {
       const openBalances = plans.get(trip.id)!.length > 0;
       for (const m of this.store.members(trip.id)) {
         if (m.id === user.id) continue;
-        await this.say(m, `${this.nameOf(user)} closed ${trip.name}${openBalances ? " (with balances still open)" : ""}. Everything's still on the trip page: ${this.pageLink(trip)}`);
+        await this.say(m, `${this.nameOf(user)} closed ${trip.name}${openBalances ? " (with balances still open)" : ""}. Everything's still on the trip page: ${this.pageLink(trip, m)}`);
       }
     }
 
     const parts: string[] = [];
     if (closing.length) {
-      const pages = closing.length === 1 && targets.length === 1 ? ` The trip page stays up: ${this.pageLink(closing[0]!)}` : "";
+      const pages = closing.length === 1 && targets.length === 1 ? ` The trip page stays up: ${this.pageLink(closing[0]!, user)}` : "";
       parts.push(`Closed ${listNames(closing.map((t) => t.name))}.${pages}`);
     }
     if (blocked.length) {
@@ -889,7 +892,7 @@ export class Tab {
     const { net } = tripLedger(this.store, trip.id);
     const mine = net.get(user.id) ?? 0;
     const bottom = mine < 0 ? `Net: you owe ${fmt(-mine)}. Reply PAY to settle up or WHY for every line.` : mine > 0 ? `Net: you're owed ${fmt(mine)}.` : `Net: all square 🎉`;
-    await this.say(user, `${trip.name} running total: ${this.runningLine(user.id, trip.id)}.\n${bottom}\nEverything, line by line: ${this.pageLink(trip)}`);
+    await this.say(user, `${trip.name} running total: ${this.runningLine(user.id, trip.id)}.\n${bottom}\nEverything, line by line: ${this.pageLink(trip, user)}`);
     this.store.setPaymentNudge(trip.id, user.id, this.now());
   }
 
@@ -973,7 +976,7 @@ export class Tab {
       await this.say(
         this.store.user(id),
         `Settling up ${trip.name}: ${listNames(owed.map((d) => `${this.nameOf(this.store.user(d.from))} owes you ${fmt(d.cents)}`))}. ` +
-          `I'll text you when they pay. Full breakdown: ${this.pageLink(trip)}`,
+          `I'll text you when they pay. Full breakdown: ${this.pageLink(trip, this.store.user(id))}`,
       );
     }
     if (!debtors.includes(user.id) && !creditors.includes(user.id)) {
@@ -1033,7 +1036,7 @@ export class Tab {
   private async link(user: User, trip: Trip) {
     await this.say(user, `${trip.name} · invite code JOIN ${trip.code}. Invite link, then the trip page:`);
     await this.say(user, this.inviteLink(trip));
-    await this.say(user, this.pageLink(trip));
+    await this.say(user, this.pageLink(trip, user));
   }
 
   private async help(user: User) {
@@ -1179,8 +1182,10 @@ export class Tab {
     return `${this.cfg.publicUrl}/j/${trip.code}`;
   }
 
-  pageLink(trip: Trip): string {
-    return `${this.cfg.publicUrl}/t/${trip.code}`;
+  /** Trip page. With a viewer, the link opens already on that person (see web/viewer.ts). */
+  pageLink(trip: Trip, viewer?: User): string {
+    const base = `${this.cfg.publicUrl}/t/${trip.code}`;
+    return viewer ? `${base}?me=${viewerToken(this.cfg.linkSecret || "dev-link-secret", trip.id, viewer.id)}` : base;
   }
 }
 

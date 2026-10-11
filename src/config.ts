@@ -18,6 +18,8 @@ export const config = {
   port: num("PORT", 3000),
   /** "spectrum" talks to real iMessage; "sim" is the local multi-user simulator. */
   messenger: (process.env.MESSENGER ?? "sim") as "spectrum" | "sim",
+  /** Signs the "this link is for you" token on trip-page links Tab texts people. */
+  linkSecret: process.env.TAB_LINK_SECRET || process.env.TAB_MASTER_KEY || process.env.SPECTRUM_PROJECT_SECRET || "dev-link-secret",
   /** Number friends text in the sms: invite link. Only meaningful on a dedicated line. */
   botPhone: process.env.BOT_PHONE ?? "",
 

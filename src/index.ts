@@ -40,11 +40,12 @@ const bot = new Tab({
     botPhone: config.botPhone,
     startingBalanceCents: config.solana.startingBalanceCents,
     reminderGapMs: config.reminderGapMs,
+    linkSecret: config.linkSecret,
   },
 });
 
 console.log(`[tab] messenger=${config.messenger} chain=${chain.label} ai=${ai.constructor.name} demo=${config.demo}`);
-startWeb({ store, bot, chain, port: config.port, botName: config.botName });
+startWeb({ store, bot, chain, port: config.port, botName: config.botName, linkSecret: config.linkSecret });
 await messenger.start((msg) => bot.handle(msg));
 
 setInterval(() => {

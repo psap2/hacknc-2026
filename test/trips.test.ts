@@ -4,6 +4,7 @@ import { HeuristicAI } from "../src/ai/heuristic.js";
 import { openDb, Store } from "../src/ledger/db.js";
 import type { InboundHandler, Messenger } from "../src/messaging/types.js";
 import { MockChain } from "../src/solana/chain.js";
+import { viewerToken } from "../src/web/viewer.js";
 
 class FakeMessenger implements Messenger {
   sent: [string, string][] = [];
@@ -107,6 +108,10 @@ describe("being in several trips at once", () => {
     );
     await say(AMIT, "total florida");
     expect(m.last(AMIT)).toContain("Florida Trip running total: you owe Jake $30.00.");
+    // The page link Tab texts you is personal, so the page opens on you instead of asking.
+    const florida = store.allTrips()[0]!;
+    const amit = store.userByPhone(AMIT)!;
+    expect(m.last(AMIT)).toContain(`https://tab.test/t/${florida.code}?me=${viewerToken("dev-link-secret", florida.id, amit.id)}`);
     await say(SAM, "TOTAL");
     expect(m.last(SAM)).toContain("Nyc Trip running total: you owe Amit $10.00.");
   });

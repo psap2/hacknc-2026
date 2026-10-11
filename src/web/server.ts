@@ -8,6 +8,7 @@ import type { Store } from "../ledger/db.js";
 import { tripLedger } from "../ledger/settle.js";
 import { toE164 } from "../messaging/types.js";
 import type { Chain } from "../solana/chain.js";
+import { viewerFromToken } from "./viewer.js";
 
 // ---------------------------------------------------------------- look & feel
 
@@ -77,8 +78,9 @@ const smsLink = (line: string, body: string) => `sms:${line}?&body=${encodeURICo
 
 // ---------------------------------------------------------------- server
 
-export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: number; botName: string }) {
+export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: number; botName: string; linkSecret?: string }) {
   const { store, bot, chain, botName } = opts;
+  const linkSecret = opts.linkSecret || "dev-link-secret";
   const app = new Hono();
   const page = (title: string, body: ReturnType<typeof html>, description?: string, extra: { image?: string; url?: string } = {}) =>
     shell(title, body, { botName, description, ...extra });
@@ -247,6 +249,8 @@ export function startWeb(opts: { store: Store; bot: Tab; chain: Chain; port: num
     const data = {
       code: trip.code,
       name: trip.name,
+      // Set when the link came from a text Tab sent this person: the page opens on them.
+      me: viewerFromToken(linkSecret, trip.id, members.map((m) => m.id), c.req.query("me")),
       members: members.map((m) => ({ id: m.id, name: m.name ?? `•••${m.phone.slice(-4)}` })),
       net: Object.fromEntries(net),
       plan,
@@ -309,6 +313,12 @@ const TRIP_JS = String.raw`
 
   var me = null;
   try { me = Number(localStorage.getItem(KEY)) || null; } catch (e) {}
+  if (D.me && byId[D.me]) {
+    // Personal link from a Tab text: remember who this is and drop the token from the address bar.
+    me = D.me;
+    try { localStorage.setItem(KEY, me); } catch (e) {}
+    try { if (history.replaceState && location.search) history.replaceState(null, '', location.pathname); } catch (e) {}
+  }
   if (me && !byId[me]) me = null;
 
   function pairs(u){
