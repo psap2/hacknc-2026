@@ -135,7 +135,7 @@ describe("being in several trips at once", () => {
   it("closes a trip only once it's settled (or when told anyway), then stops asking", async () => {
     await say(JAKE, "$60 rental car, florida");
     await say(AMIT, "close florida");
-    expect(m.last(AMIT)).toBe('Florida Trip isn\'t settled yet: Amit owes Jake $30.00.\nReply SETTLE to sort it out, or "close florida anyway" to close it as is.');
+    expect(m.last(AMIT)).toBe('Florida Trip isn\'t settled yet: Amit owes Jake $30.00.\nReply SETTLE to sort it out, "we settled it ourselves" if the money already changed hands, or "close florida anyway" to close it as is.');
     await say(AMIT, "close florida anyways");
     expect(m.last(AMIT)).toContain("Closed Florida Trip.");
     expect(m.last(AMIT)).toContain("You're still in Nyc Trip.");
@@ -148,12 +148,22 @@ describe("being in several trips at once", () => {
     expect(m.last(AMIT)).toMatch(/isn't settled yet/);
   });
 
+  it("'we sorted it out ourselves' closes the trip and books the leftovers as paid outside Tab", async () => {
+    await say(JAKE, "$60 rental car, florida");
+    await say(AMIT, "you can close out florida, me and jake sorted that out already");
+    expect(m.last(AMIT)).toContain("Closed Florida Trip.");
+    expect(m.last(AMIT)).toContain("Marked as settled outside Tab: Amit → Jake $30.00.");
+    expect(m.last(JAKE)).toContain("Amit closed Florida Trip and marked what was left as settled outside Tab.");
+    expect(store.transfers(1)).toMatchObject([{ from_id: store.userByPhone(AMIT)!.id, to_id: store.userByPhone(JAKE)!.id, cents: 3000, tx_sig: null }]);
+    expect(store.trip(1).closed_at).toBe(now);
+  });
+
   it("'end all active trips' closes what's settled and lists what isn't", async () => {
     await say(JAKE, "$60 rental car, florida");
     await say(AMIT, "end all active trips");
     expect(m.last(AMIT)).toBe(
       "Closed Nyc Trip.\nFlorida Trip isn't settled yet: Amit owes Jake $30.00.\n" +
-        'Reply SETTLE to sort it out, or "close all anyway" to close it as is.\nYou\'re still in Florida Trip.',
+        'Reply SETTLE to sort it out, "we settled it ourselves" if the money already changed hands, or "close all anyway" to close it as is.\nYou\'re still in Florida Trip.',
     );
     expect(m.last(SAM)).toContain("Amit closed Nyc Trip.");
     await say(AMIT, "close all anyway");

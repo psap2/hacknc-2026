@@ -18,7 +18,8 @@ export type Intent =
   /** Start a trip. tripName null = they want one but didn't say what to call it. */
   | { kind: "new_trip"; tripName: string | null }
   /** Close/finish a trip; tripName null = whichever one they're in. */
-  | { kind: "close_trip"; tripName: string | null; all: boolean; force: boolean }
+  /** force = insists despite open balances; settledOutside = says the money already changed hands off Tab. */
+  | { kind: "close_trip"; tripName: string | null; all: boolean; force: boolean; settledOutside: boolean }
   /** Push back on a charge; reason is their own words. */
   | { kind: "dispute"; reason: string | null }
   /** Nudge named people (or "everyone") about what they owe. */

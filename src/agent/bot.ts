@@ -147,7 +147,7 @@ export class Tab {
     const needsPick = !named && !tripOverride && open.length > 1;
     if (fresh.active_trip_id !== trip.id) this.store.setActiveTrip(user.id, trip.id);
 
-    if (closeCmd) return this.closeTrips(user, closeAll ? open : [trip], open, Boolean(closeCmd[2]));
+    if (closeCmd) return this.closeTrips(user, closeAll ? open : [trip], open, { force: Boolean(closeCmd[2]) });
 
     if (/^(YES|Y|YEP|YEAH|OK|OKAY|APPROVE|APPROVED|👍)$/.test(cmd)) return this.approve(user, this.tripWithDisputeAgainst(user, open) ?? trip);
     const dispute = text.match(/^dispute\b[\s:,-]*(.*)$/is);
@@ -194,10 +194,10 @@ export class Tab {
       case "new_trip":
         return this.startTripFromIntent(user, intent.tripName);
       case "close_trip": {
-        if (intent.all) return this.closeTrips(user, open, open, intent.force);
+        if (intent.all) return this.closeTrips(user, open, open, intent);
         const target = intent.tripName ? this.matchTrip(open, intent.tripName) : undefined;
         if (target === "ambiguous") return this.say(user, `Which one: ${listNames(open.map((t) => t.name), "or")}?`);
-        return this.closeTrips(user, [target?.trip ?? trip], open, intent.force);
+        return this.closeTrips(user, [target?.trip ?? trip], open, intent);
       }
       case "dispute":
         return this.dispute(user, named ? [trip] : open, intent.reason ?? "");
@@ -300,17 +300,31 @@ export class Tab {
   }
 
   /** Close one or more trips. Unsettled ones are refused unless `force` ("close florida anyway"). */
-  private async closeTrips(user: User, targets: Trip[], open: Trip[], force: boolean) {
+  /**
+   * Close one or more trips. With balances open: refused by default; `settledOutside` ("we sorted
+   * it out") records the outstanding amounts as paid outside Tab so the books close clean; `force`
+   * ("close it anyway") closes with the balances left showing.
+   */
+  private async closeTrips(user: User, targets: Trip[], open: Trip[], how: { force?: boolean; settledOutside?: boolean }) {
+    const now = this.now();
     const plans = new Map(targets.map((t) => [t.id, tripLedger(this.store, t.id).plan]));
-    const blocked = force ? [] : targets.filter((t) => plans.get(t.id)!.length);
+    const blocked = how.force || how.settledOutside ? [] : targets.filter((t) => plans.get(t.id)!.length);
     const closing = targets.filter((t) => !blocked.includes(t));
+    const settledLines: string[] = [];
 
     for (const trip of closing) {
-      this.store.closeTrip(trip.id, this.now());
-      const openBalances = plans.get(trip.id)!.length > 0;
+      const plan = plans.get(trip.id)!;
+      if (how.settledOutside && plan.length) {
+        for (const d of plan) {
+          this.store.recordTransfer({ trip_id: trip.id, from_id: d.from, to_id: d.to, cents: d.cents, tx_sig: null, status: "sent", created_at: now });
+          settledLines.push(`${this.nameOf(this.store.user(d.from))} → ${this.nameOf(this.store.user(d.to))} ${fmt(d.cents)}`);
+        }
+      }
+      this.store.closeTrip(trip.id, now);
+      const note = plan.length ? (how.settledOutside ? " and marked what was left as settled outside Tab" : " (with balances still open)") : "";
       for (const m of this.store.members(trip.id)) {
         if (m.id === user.id) continue;
-        await this.say(m, `${this.nameOf(user)} closed ${trip.name}${openBalances ? " (with balances still open)" : ""}. Everything's still on the trip page: ${this.pageLink(trip, m)}`);
+        await this.say(m, `${this.nameOf(user)} closed ${trip.name}${note}. Everything's still on the trip page: ${this.pageLink(trip, m)}`);
       }
     }
 
@@ -318,13 +332,14 @@ export class Tab {
     if (closing.length) {
       const pages = closing.length === 1 && targets.length === 1 ? ` The trip page stays up: ${this.pageLink(closing[0]!, user)}` : "";
       parts.push(`Closed ${listNames(closing.map((t) => t.name))}.${pages}`);
+      if (settledLines.length) parts.push(`Marked as settled outside Tab: ${settledLines.join(", ")}.`);
     }
     if (blocked.length) {
       const detail = blocked
         .map((t) => `${t.name} isn't settled yet: ${listNames(plans.get(t.id)!.map((d) => `${this.nameOf(this.store.user(d.from))} owes ${this.nameOf(this.store.user(d.to))} ${fmt(d.cents)}`))}.`)
         .join("\n");
       const again = blocked.length === 1 && targets.length === 1 ? `close ${shortTripName(blocked[0]!).toLowerCase()} anyway` : "close all anyway";
-      parts.push(`${detail}\nReply SETTLE to sort it out, or "${again}" to close ${blocked.length === 1 ? "it" : "them"} as is.`);
+      parts.push(`${detail}\nReply SETTLE to sort it out, "we settled it ourselves" if the money already changed hands, or "${again}" to close ${blocked.length === 1 ? "it" : "them"} as is.`);
     }
     const left = open.filter((t) => !closing.includes(t));
     if (closing.length && left.length) parts.push(`You're still in ${listNames(left.map((t) => t.name))}.`);
@@ -516,7 +531,7 @@ export class Tab {
           await this.say(user, `Hi! 👋 What should I call you? (Just your first name is fine.)`);
           return true;
         }
-        const name = titleCase(text.replace(/^(i'?m|im|call me|it'?s|my name is)\s+/i, "").split(/\s+/).slice(0, 2).join(" ")).slice(0, 30);
+        const name = parseName(text);
         this.store.setUserName(user.id, name);
         this.store.clearPending(user.id);
         await this.say(user, `Got it, ${name}. ${this.welcomeTip()}`);
@@ -1196,4 +1211,22 @@ function shortTripName(trip: Trip): string {
 
 function escapeRe(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** "Dan", "I'm Dan", "Dan is here", "it's kunal!" -> "Dan" / "Kunal". Keeps a two-word name like "Mary Ann". */
+export function parseName(text: string): string {
+  const words = text
+    .replace(/^(?:hi+|hey+|hello+|yo+)[,!\s]+/i, "")
+    .replace(/^(?:i'?m|im|call me|it'?s|its|this is|my name is|my name'?s|name'?s)\s+/i, "")
+    .replace(/[^\p{L}\p{N}'\- ]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  const stop = /^(is|here|from|and|the|this|it|lol|haha|btw|nice|hey|hi|hello|joining|again|yo|was|am)$/i;
+  const kept: string[] = [];
+  for (const w of words) {
+    if (stop.test(w)) break;
+    kept.push(w);
+    if (kept.length === 2) break;
+  }
+  return titleCase(kept.join(" ") || words[0] || "").slice(0, 30);
 }

@@ -83,11 +83,19 @@ export function heuristicIntent(text: string, ctx: InterpretContext): Intent {
   // The trip name may already have been stripped by the router ("we're done with nyc" -> "we're done with").
   const close =
     t.match(/^(?:we'?re |i'?m )?(?:all )?done with\s*(?:the\s+)?(.*?)(?:\s+(?:trips?|tabs?))?\s*(?:anyways?|regardless)?[.!]*$/i) ??
-    t.match(/\b(?:close|end|finish|archive|wrap up|shut down)\s+(?:the\s+|my\s+|our\s+)?(?:(.+?)\s+)?(?:trips?|tabs?)\b/i);
+    t.match(/\b(?:close|end|finish|archive|wrap up|shut down)\s+(?:the\s+|my\s+|our\s+)?(?:(.+?)\s+)?(?:trips?|tabs?)\b/i) ??
+    // "you can close out", "wrap it up", "close this out" (trip name may already be stripped)
+    t.match(/\b(?:close|wrap|finish)\s+(?:it|this|that|things)?\s*(?:out|up)\b()/i);
   if (close) {
     const what = close[1]?.trim() ?? "";
     const all = /\b(all|every|everything|both)\b/i.test(what);
-    return { kind: "close_trip", tripName: all ? null : what.replace(/\b(active|open|current)\b/gi, "").trim() || null, all, force: /\b(anyways?|regardless)\b/i.test(t) };
+    return {
+      kind: "close_trip",
+      tripName: all ? null : what.replace(/\b(active|open|current)\b/gi, "").trim() || null,
+      all,
+      force: /\b(anyways?|regardless|don'?t care|whatever)\b/i.test(t),
+      settledOutside: /\b(sorted|settled|squared|paid|handled|took care of)\b.*\b(out|up|already|ourselves|in person|cash|venmo|outside)\b|\balready (paid|settled)\b/i.test(t),
+    };
   }
   if (/\b(invite|trip) (link|page)\b|send (me )?the link\b/i.test(t)) return { kind: "link" };
   const remind = t.match(/\b(?:remind|nudge|poke|bug)\s+(.+?)[.!?]*$/i);

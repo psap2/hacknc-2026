@@ -151,6 +151,8 @@ export function openDb(path: string): DB {
   db.prepare("UPDATE shares SET status = 'approved', decided_at = COALESCE(decided_at, ?) WHERE status = 'pending'").run(Date.now());
   // Trips can be closed once everyone's square, so people in several trips aren't asked
   // "which trip?" about ones that are over.
+  // One-off: names captured from "Dan is here"-style replies came out as "Dan Is".
+  db.prepare("UPDATE users SET name = substr(name, 1, length(name) - 3) WHERE name LIKE '% Is' AND length(name) > 3").run();
   const tripCols = (db.prepare("PRAGMA table_info(trips)").all() as { name: string }[]).map((c) => c.name);
   if (!tripCols.includes("closed_at")) db.exec("ALTER TABLE trips ADD COLUMN closed_at INTEGER");
   return db;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Tab } from "../src/agent/bot.js";
+import { parseName, Tab } from "../src/agent/bot.js";
 import { HeuristicAI } from "../src/ai/heuristic.js";
 import { openDb, Store } from "../src/ledger/db.js";
 import type { InboundHandler, Messenger } from "../src/messaging/types.js";
@@ -178,5 +178,15 @@ describe("joining from the web invite", () => {
     await bot.handle({ phone: JAKE, text: `JOIN${trip.code}`, images: [] });
     expect(store.isMember(trip.id, store.userByPhone(JAKE)!.id)).toBe(true);
     expect(m.to(JAKE).at(-1)).toContain("What should I call you?");
+  });
+});
+
+describe("reading a name out of a reply", () => {
+  it("keeps the name and drops the chatter", () => {
+    expect(parseName("Dan")).toBe("Dan");
+    expect(parseName("Dan is here")).toBe("Dan");
+    expect(parseName("hey it's kunal!")).toBe("Kunal");
+    expect(parseName("I'm Mary Ann")).toBe("Mary Ann");
+    expect(parseName("this is Priya, nice to meet you")).toBe("Priya");
   });
 });

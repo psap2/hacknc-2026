@@ -409,7 +409,7 @@ const TRIP_JS = String.raw`
     var list = D.transfers.slice().reverse();
     $('#payments').innerHTML = list.length ? '<div class="card">' + list.map(function(t){
       return '<div class="line"><span>'+esc(name(t.from))+' paid '+esc(name(t.to))+' <b>'+fmt(t.cents)+'</b> <span class="muted">'+t.date+'</span></span>'
-        + (t.url ? '<a href="'+esc(t.url)+'" target="_blank" rel="noopener">view ↗</a>' : '') + '</div>';
+        + (t.url ? '<a href="'+esc(t.url)+'" target="_blank" rel="noopener">view ↗</a>' : '<span class="muted">outside Tab</span>') + '</div>';
     }).join('') + '</div>' : '<div class="card empty">No payments yet.</div>';
   }
 
